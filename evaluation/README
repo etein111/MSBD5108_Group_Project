@@ -1,0 +1,40 @@
+# JevBench: Evaluation & Metrics Pipeline (Block 2)
+
+本项目是 JevBench 本地 9B 大模型评测框架的**数据与评测核心模块（Block 2）**，负责标准数据集构建、评测循环调度、§2.4 全套核心指标计算以及可视化看板生成。
+
+## 📁 目录结构
+- `data_pipeline.py`: 数据管线，负责从 Hugging Face 拉取开源语料，生成平衡的 `noul` 和 `score` 任务，并按 60:20:20 切分保存为 JSONL。
+- `harness.py`: 评测执行引擎 (`JevBenchHarness`)，定义了统一的 `ModelAdapter` 协议，负责批量读取测试集并收集推理结果。
+- `metrics.py`: 指标与可视化模块 (`JevBenchMetrics`)，实现 Exact Match、Macro-F1、QWK、MAE、ECE (15-bin)、Brier Score 及综合评估看板绘制。
+
+## 📊 评估指标说明 (§2.4)
+1. **NOUL 任务 (二分类决策)**: 
+   - 核心指标: Exact Match, Macro-F1
+   - 校准指标: ECE (15-bin), Brier Score, Reliability 校准曲线
+2. **SCORE 任务 (0-5 多级评分)**: 
+   - 核心指标: Exact Match, MAE (平均绝对误差), QWK (二次加权 Kappa)
+
+---
+
+## 🤝 组员对接指南 (Block 3 适配器开发)
+
+如果你负责编写 Block 3 的真实模型适配器（`adapters.py`），请务必遵守以下契约：
+
+1. **统一接口契约 (`ModelAdapter` Protocol)**:
+   你的模型适配器类必须实现如下签名的 `predict` 方法：
+   ```python
+   def predict(self, prompt: str, text: str, task_type: str, options: List[Any]) -> tuple:
+       """
+       返回: (decision, probability, logits_dict, latency_seconds)
+       """
+       pass
+
+测评集样本
+{
+    "id": "noul_0001",
+    "type": "noul",
+    "prompt": "Is this message spam?",
+    "text": "待判定文本...",
+    "label": "yes",
+    "options": ["no", "yes"]
+}
