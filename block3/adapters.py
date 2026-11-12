@@ -192,7 +192,8 @@ def augment_with_shots(
 
 def load_demonstrations(path: Path, per_type: int = 4) -> list:
     """Take the first ``per_type`` train-split records of each decision type."""
-    records = [json.loads(line) for line in Path(path).read_text(encoding="utf-8").splitlines() if line.strip()]
+    with Path(path).open(encoding="utf-8") as handle:
+        records = [json.loads(line) for line in handle if line.strip()]
     chosen: Dict[str, list] = {}
     for record in records:
         bucket = chosen.setdefault(record["type"], [])

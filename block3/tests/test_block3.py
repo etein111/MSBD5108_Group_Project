@@ -139,6 +139,15 @@ class AdapterTests(unittest.TestCase):
         self.assertEqual(len([d for d in demos if d["type"] == "noul"]), 2)
         self.assertEqual(len([d for d in demos if d["type"] == "score"]), 2)
 
+    def test_demonstrations_survive_unicode_line_separators(self):
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "train.jsonl"
+            tricky = dict(NOUL_RECORD, id="u1", text="before\u2028after")
+            path.write_text(json.dumps(tricky, ensure_ascii=False) + "\n", encoding="utf-8")
+            demos = load_demonstrations(path, per_type=1)
+        self.assertEqual(len(demos), 1)
+        self.assertIn("\u2028", demos[0]["text"])
+
     def test_runner_produces_calibratable_records(self):
         results = run_adapter([NOUL_RECORD, SCORE_RECORD], MockAdapter())
         self.assertEqual([record["status"] for record in results], ["success", "success"])
