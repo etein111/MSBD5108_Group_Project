@@ -78,8 +78,8 @@ def reliability_grid(
                       markeredgecolor="white", markeredgewidth=0.8,
                       label=f"{name} (ECE {ece:.3f})", zorder=2)
 
-        axis.set_xlim(0, 1)
-        axis.set_ylim(0, 1)
+        axis.set_xlim(-0.02, 1.02)
+        axis.set_ylim(-0.02, 1.02)
         axis.set_aspect("equal", adjustable="box")
         axis.set_xlabel("Mean predicted confidence", fontsize=10, color=MUTED)
         axis.set_ylabel("Empirical accuracy", fontsize=10, color=MUTED)
@@ -94,6 +94,15 @@ def reliability_grid(
             axis.spines[spine].set_color("#C9CED6")
         axis.grid(True, linestyle=":", linewidth=0.6, color="#D8DCE2", zorder=0)
         axis.legend(fontsize=8.5, frameon=False, loc="upper left")
+        if report.params.get("at_boundary"):
+            # A railed temperature means the fitted distribution is uniform: the
+            # single recalibrated point is an artefact, not a good model.
+            axis.text(
+                0.03, 0.75,
+                "temperature at search bound\n→ uniform predictor\n(no usable signal)",
+                transform=axis.transAxes, ha="left", va="top",
+                fontsize=7.5, color=MUTED, style="italic",
+            )
 
     for position in range(len(reports), rows * columns):
         axes[position // columns][position % columns].set_visible(False)

@@ -92,20 +92,31 @@ def _platt_objective(a: float, b: float, x: np.ndarray, y: np.ndarray, l2: float
     return float(np.mean(loss) + 0.5 * l2 * a * a)
 
 
+#: Search bounds for the temperature. The upper bound is deliberately far past
+#: any sensible optimum: a fit that rails against it means the logits carry no
+#: usable signal and the loss is minimised by flattening towards uniform, which
+#: is reported as ``at_boundary`` rather than silently clipped.
+TEMPERATURE_BOUNDS = (0.05, 1.0e4)
+
+
 @dataclass
 class TemperatureScaler:
     """``softmax(logits / T)`` over the native option slots."""
 
     temperature: float = 1.0
+    at_boundary: bool = False
 
     def fit(self, logits: np.ndarray, labels: np.ndarray) -> "TemperatureScaler":
         logits = np.asarray(logits, dtype=float)
         labels = np.asarray(labels, dtype=int)
         if logits.ndim != 2 or len(labels) == 0:
             raise ValueError("Expected a 2-D logit matrix and one label per row.")
-        grid = np.exp(np.linspace(math.log(0.05), math.log(20.0), 801))
+        low, high = TEMPERATURE_BOUNDS
+        grid = np.exp(np.linspace(math.log(low), math.log(high), 801))
         losses = [nll_with_temperature(logits, labels, temperature) for temperature in grid]
-        self.temperature = float(grid[int(np.argmin(losses))])
+        best = int(np.argmin(losses))
+        self.temperature = float(grid[best])
+        self.at_boundary = best in (0, len(grid) - 1)
         return self
 
     def transform(self, logits: np.ndarray) -> np.ndarray:
@@ -305,7 +316,13 @@ def cross_fitted(
             logits = logit_matrix(records, kind)
             scaler = TemperatureScaler().fit(logits[train], labels[train])
             calibrated[held_out] = scaler.transform(logits[held_out])
-            fold_params.append({"fold": fold, "temperature": scaler.temperature})
+            fold_params.append(
+                {
+                    "fold": fold,
+                    "temperature": scaler.temperature,
+                    "at_boundary": scaler.at_boundary,
+                }
+            )
         else:
             raise ValueError(f"unknown calibration method: {method!r}")
 
@@ -315,7 +332,7 @@ def cross_fitted(
         params = {"a": pooled.a, "b": pooled.b}
     else:
         pooled = TemperatureScaler().fit(logit_matrix(records, kind), labels)
-        params = {"temperature": pooled.temperature}
+        params = {"temperature": pooled.temperature, "at_boundary": pooled.at_boundary}
     return calibrated, params, fold_params
 
 
@@ -399,6 +416,16 @@ def _markdown(payload: Mapping[str, Any]) -> str:
                 brier_cal=report["calibrated"]["brier"],
             )
         )
+    railed = [
+        f"- **{r['model']}/{r['kind']}**: temperature {r['params']['temperature']:.3g} sits on the "
+        f"search bound {TEMPERATURE_BOUNDS[0]:g}-{TEMPERATURE_BOUNDS[1]:g}. The NLL is still "
+        "decreasing at the edge, so the best fit is the uniform distribution: these logits carry "
+        "**no usable signal** for these labels, and the low ECE is not evidence of a good model."
+        for r in payload["reports"]
+        if r["params"].get("at_boundary")
+    ]
+    if railed:
+        lines += ["", "## Warnings", ""] + railed
     lines += [
         "",
         "Fitted parameters (pooled, for serving):",

@@ -60,6 +60,24 @@ python -m block3 calibrate --pred-dir block3/outputs/preds --out-dir block3/outp
 python -m block3 calibrate --pred-dir outputs/preds --out-dir outputs/calibration
 ```
 
+## 实测（2026-11-12）
+
+| 作业 | 内容 | 结果 |
+| --- | --- | --- |
+| `777055` | 冒烟，每类 20 条 × 2 模型 | COMPLETED 1m17s |
+| `777059` | 全量 2000 条 × 2 模型 | COMPLETED 10m20s，0 失败 |
+
+JEV 4.6 min / 5.97 rec/s，Qwen 5.4 min / 6.07 rec/s；单条 p50 延迟 137 ms / 172 ms。
+校准是纯 numpy/matplotlib，**直接在登录节点跑**即可，不占 GPU 分钟：
+
+```bash
+ssh cyeah@superpod.ust.hk
+source /cm/shared/apps/Anaconda3/2023.09-0/etc/profile.d/conda.sh
+conda activate jevbench && export PYTHONNOUSERSITE=1
+cd /scratch/mscbdtspod2026/cyeah/5018/code
+python -m block3 calibrate --pred-dir ../outputs/preds --out-dir ../outputs/calibration --folds 5 --seed 0
+```
+
 ## 已知坑
 
 | 现象 | 处理 |
@@ -70,3 +88,5 @@ python -m block3 calibrate --pred-dir outputs/preds --out-dir outputs/calibratio
 | 作业被 `slurmstepd` 杀掉 | GPU 分钟累计超预算;先用 `sacct` 查余额,再决定 `--time` |
 | 登录节点 `torch.cuda.is_available()` 为 False | 正常,登录节点没有 GPU |
 | 模型下载慢/中断 | 在登录节点先跑一次 `resolve_snapshot`,job 里就是纯本地加载 |
+| `json.decoder.JSONDecodeError: Unterminated string` | 用 `str.splitlines()` 读 JSONL 会在 ` `/` ` 处断开;改为逐行迭代文件句柄(已修,`12d1302`) |
+| 长时间 ssh 会话中途 `Connection closed by remote host` | 用 `setsid nohup` 起远端监视器写标记文件,本地后台轮询,单次 ssh 失败不影响整体 |

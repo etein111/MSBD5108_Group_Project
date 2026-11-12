@@ -211,6 +211,20 @@ class CalibrationTests(unittest.TestCase):
         scaler = TemperatureScaler().fit(logits, labels)
         self.assertGreater(scaler.temperature, 1.4)
         self.assertLess(scaler.temperature, 3.0)
+        self.assertFalse(scaler.at_boundary)
+
+    def test_temperature_flags_uninformative_logits(self):
+        """Confident logits whose labels are independent rail at the upper bound."""
+        rng = np.random.default_rng(3)
+        n = 2000
+        stated = rng.integers(0, 6, size=n)
+        logits = np.full((n, 6), -0.6)
+        logits[np.arange(n), stated] = 3.0
+        labels = rng.integers(0, 6, size=n)
+        scaler = TemperatureScaler().fit(logits, labels)
+        self.assertTrue(scaler.at_boundary)
+        self.assertEqual(scaler.temperature, scaler.temperature)  # finite, not NaN
+        self.assertGreaterEqual(scaler.temperature, 1.0e4)
 
     def test_cross_fitting_is_deterministic(self):
         records = synthetic_records("noul", n=80)

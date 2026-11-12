@@ -12,7 +12,9 @@
 | `plots.py` | T9 | reliability diagram（4 面板：模型 × `noul`/`score`） |
 | `probes.py` | T10 | 四类探针的成对样本生成器 |
 | `runner.py` | T6/T7/T9 | `predict` / `calibrate` 两条命令 |
-| `tests/test_block3.py` | — | 16 个离线测试，无需 GPU、无需启动服务 |
+| `cluster_run.py` | T6/T7 | SuperPOD 上不启服务、进程内直接批量推理（可断点续跑） |
+| `slurm_infer.slurm` | — | 提交到 `normal` 分区的批处理脚本 |
+| `tests/test_block3.py` | — | 18 个离线测试，无需 GPU、无需启动服务 |
 
 ## 快速开始
 
@@ -107,6 +109,52 @@ Prediction(decision, prob: dict[str, float], logits: dict[str, float], latency_m
 且 `noul` 只有 `false/true`、没有 abstain 槽。因此改名、换序、弃权都只能作为 **prompt 层扰动**施加，
 通过与配对原样本的决策翻转率来衡量，而不是修改模型的输出空间。
 
+## 真实运行结果（SuperPOD，2026-11-12）
+
+一卡 H800 80GB、4-bit NF4、进程内批量推理（`cluster_run.py`），2000 条评测 × 2 个模型，
+**0 失败**，作业 `777059` 墙钟 10m20s（JEV 4.6 min，Qwen 5.4 min）。冒烟作业为 `777055`
+（每类 20 条，1m17s）。产物在 `block3/outputs/preds/` 与 `block3/outputs/calibration/`（已 gitignore）。
+
+**延迟（单条，毫秒）**
+
+| 模型 | mean | p50 | p95 |
+| --- | --- | --- | --- |
+| JEV-9B | 140.7 | 137.0 | 180.1 |
+| Qwen3.5-9B（few-shot） | 164.5 | 172.0 | 215.8 |
+
+**`noul`（二分类，n=998，正例 141）** — 5 折交叉拟合
+
+| 模型 | ACC raw | ACC 校准后 | AUC | ECE raw → 校准 | Brier raw → 校准 |
+| --- | --- | --- | --- | --- | --- |
+| JEV-9B | **0.9549** | 0.9619 | **0.9736** | 0.1407 → **0.0147** | 0.0602 → 0.0347 |
+| Qwen3.5-9B | 0.5491 | 0.9048 | 0.8888 | 0.0722 → 0.0232 | 0.2459 → 0.0750 |
+
+三点必须如实写进报告，否则容易被误读：
+
+1. **JEV 更准，但原始概率更"虚"。** AUC 0.974 vs 0.889、raw ACC 95.5% vs 54.9%，JEV 的决策明显更好；
+   但 JEV 的 raw ECE（0.141）反而比 Qwen（0.072）差——它对自己的答案过度自信。
+   一个两参数 Platt（`a=3.34, b=+1.12`）就能把 ECE 压到 0.015，代价可忽略。
+2. **Qwen 的 54.9% 不是"不会做"，是阈值错位。** 它对 57.9% 的样本答 yes（真实正例率 14.1%），
+   但 AUC 0.889 说明排序里仍有信息；Platt 的偏移项 `b=-3.25` 把判定阈值挪到 `p≈0.61`，
+   交叉拟合后 ACC 回到 90.5%。因此"校准后 ACC 0.905"应表述为 **"学出一个阈值后达到的准确率"**，
+   不能当成 Qwen 天然有 90% 准确率。
+3. **校准不改变排序能力。** 两者 Brier 的下降主要来自收缩（shrinkage），不是区分度提升；
+   ECE 降低证明"置信度对得上正确率"，不等于模型变强。
+
+**`score`（六分类，n=1002）— 当前数据无效，数字不要上台**
+
+| 模型 | ACC | ACC 若把 gold 反成 5−g | corr(gold, E[score]) | 温度 |
+| --- | --- | --- | --- | --- |
+| JEV-9B | 0.131 | 0.226 | **−0.410** | 撞上界 |
+| Qwen3.5-9B | 0.128 | 0.175 | −0.201 | 撞上界 |
+
+- 六分类随机准确率 0.167，两个模型都**低于随机**；JEV 的期望分与标签**负相关**，
+  说明 `score` 的标签映射方向就是错的（把 IMDB 星级当成 toxicity 0–5）。
+- 温度缩放的最优解落在搜索上界（`T=1e4`），即"最优校准 = 输出均匀分布"，
+  Brier 恰好等于 `5/6 = 0.8333`。报告里校准后的 ECE 0.036 是"均匀分布"的性质，
+  **不是模型变准**；`calibration_report.md` 的 Warnings 段和 `reliability.png` 的面板注记都会显式标出这一点。
+- 结论：`score` 的 T9 结论（以及探针里所有 score 分支）必须等 Block 1 换成真实 toxicity 数据后重跑。
+
 ## 测试
 
 ```bash
@@ -126,9 +174,13 @@ python -m unittest discover -s block3/tests -v
 
 ## 当前状态与待办
 
-* ✅ 适配器、校准、探针、CLI、16 个离线测试全部通过（mock 链路）。
-* ⏳ 真实数字需要在 CUDA 机器上启动 `deployment.server` 后跑 `--model jev/qwen`。
-* ⚠️ `evaluation/data/*.jsonl` 的 `score` 仍来自 IMDB 占位映射，会直接影响 T9 关于 score 的结论，
-  应等 Block 1 换成 Jigsaw/ToxiGen 后重跑。
+* ✅ 适配器、校准、探针、CLI、18 个离线测试全部通过（mock 链路）。
+* ✅ 真实数字已在 SuperPOD 上跑出（见上节）：`noul` 的 T6/T7/T9 结论可用，`score` 不可用。
+* ⏳ T10 探针只生成了成对样本，**尚未在真实模型上跑扰动对比**；`noul` 分支可以马上跑，
+  `score` 分支应等 Block 1 换数据后一起跑。
+* ⚠️ `evaluation/data/*.jsonl` 的 `score` 仍来自 IMDB 占位映射（与 toxicity 无关且方向可能反），
+  会直接废掉 T9 关于 score 的结论，应等 Block 1 换成 Jigsaw/ToxiGen 后重跑。
 * ⚠️ 服务端 Qwen 路径目前与 JEV 共用同一个 prompt 模板，few-shot 只在适配器层加入；
   若之后把 few-shot 移进服务端，需同步更新本 README 的"公平配对"描述。
+* ⚠️ 延迟数字来自 `cluster_run` 的进程内批量推理（含每条约 0.4 ms 落盘开销），
+  不等于 HTTP 服务端到端延迟，T8 若引用需注明测量口径。
