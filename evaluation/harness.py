@@ -63,7 +63,11 @@ class JevBenchHarness:
             opts = item.get("options", [])
 
             try:
-                dec, prob, logits, lat = self.adapter.predict(prompt, text, ttype, opts)
+                predict_record = getattr(self.adapter, "predict_record", None)
+                if callable(predict_record):
+                    dec, prob, logits, lat = predict_record(item)
+                else:
+                    dec, prob, logits, lat = self.adapter.predict(prompt, text, ttype, opts)
                 record = {
                     "id": sid,
                     "type": ttype,

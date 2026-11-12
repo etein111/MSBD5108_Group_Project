@@ -6,7 +6,7 @@
 /scratch/mscbdtspod2026/cyeah/5018/
 ├── code/          # rsync 自本地仓库(不含 .git / outputs)
 ├── hf/            # HF_HOME,JEV-9B 权重 ~18GB
-└── outputs/preds/ # jev.jsonl / qwen.jsonl / run_summary.json
+└── outputs/preds-shared-shots/ # jev.jsonl / qwen.jsonl / run_summary.json
 ```
 
 ## 环境(已创建)
@@ -39,6 +39,21 @@ sbatch block3/slurm_infer.slurm
 
 `--gpus=1`、`--time=01:00:00`;H800 80GB 对 9B(4-bit NF4)绰绰有余,单卡即可。
 
+## T10 选项探针
+
+在集群仓库根目录生成选项探针，再给 Slurm 脚本传入专用输入和输出目录。两模型使用脚本指定的同一份 train few-shot 示例。
+
+```bash
+python -m block3 probes --source-type noul --limit 2 --seed 0 \
+    --probes option_renaming option_order_permutation abstain_removal \
+    --out-dir block3/outputs/choice-probes
+sbatch block3/slurm_infer.slurm \
+    --input "$PWD/block3/outputs/choice-probes/all_pairs.jsonl" \
+    --out-dir "$PWD/../outputs/choice-t10"
+```
+
+查看 `choice-t10/run_summary.json` 中各模型的 `option_probes`。需要增加样本量时，通过生成器的 `--limit` 按源样本抽取，保留完整配对。
+
 ## 断点续跑
 
 `cluster_run` 会跳过输出文件里已有的 `id`,每条立即落盘:
@@ -47,20 +62,24 @@ sbatch block3/slurm_infer.slurm
 * 只想补一个模型 → `--models qwen`;
 * 冒烟产物和全量产物在同一个 `jev.jsonl` 里,全量时会自动跳过前 20 条。
 
+只在输入、选项和 few-shot 方案一致时复用目录。主评测脚本默认使用 `preds-shared-shots/`，历史的仅 Qwen few-shot 结果在 `preds/`。
+
 ## 回本地做校准
 
 ```bash
-scp -r cyeah@superpod.ust.hk:/scratch/mscbdtspod2026/cyeah/5018/outputs/preds ./block3/outputs/
-python -m block3 calibrate --pred-dir block3/outputs/preds --out-dir block3/outputs/calibration
+scp -r cyeah@superpod.ust.hk:/scratch/mscbdtspod2026/cyeah/5018/outputs/preds-shared-shots ./block3/outputs/
+python -m block3 calibrate --pred-dir block3/outputs/preds-shared-shots --out-dir block3/outputs/shared-calibration
 ```
 
 或者直接在集群上跑(校准只需要 numpy/matplotlib,`jevbench` 环境已装):
 
 ```bash
-python -m block3 calibrate --pred-dir outputs/preds --out-dir outputs/calibration
+python -m block3 calibrate --pred-dir ../outputs/preds-shared-shots --out-dir ../outputs/shared-calibration
 ```
 
 ## 实测（2026-11-12）
+
+以下是仅 Qwen 使用 few-shot 的历史结果。
 
 | 作业 | 内容 | 结果 |
 | --- | --- | --- |

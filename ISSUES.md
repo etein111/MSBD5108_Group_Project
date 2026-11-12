@@ -126,6 +126,8 @@ exact match 只在注明阈值（0.5，或按 held_out 先验校正后）的前�
 
 ### 7. `latency` 单位不一致
 
+**已修复**：服务新增显式 `latency_ms` 字段，旧 `latency` 保留为等值毫秒别名。块 3 优先读取新字段，并兼容旧服务；harness 四元组仍转换为秒。测试覆盖两种任务、新旧响应和毫秒→秒转换。以下保留原始问题描述。
+
 `deployment/protocol.py:32` 的 `Prediction.latency` 是**毫秒**（`runtime.py:151` 乘了 1000）；
 `harness.py:12` 的契约是 `latency_seconds`。块 3 的适配器在 `as_harness_tuple()` 里除了 1000，
 但任何绕过适配器直接接的人都会拿到 1000 倍的数字。
@@ -133,12 +135,12 @@ exact match 只在注明阈值（0.5，或按 held_out 先验校正后）的前�
 
 ### 8. `requirements.txt` 装不出能跑的评测环境
 
+**已修复**：新增固定直接依赖版本的 `requirements-eval.txt`，包含基础依赖及 numpy、scikit-learn、matplotlib、datasets。安装和离线验证见 [评测环境说明](evaluation/README)。
+
 `requirements.txt` 只有 4 个包（fastapi / httpx / pydantic / uvicorn），`requirements-cuda.txt` 只加
 torch 相关。而 `evaluation/metrics.py` 需要 **numpy / scikit-learn / matplotlib**，
 `evaluation/data_pipeline.py` 需要 **datasets**，全都没有声明。
-按 `deployment/README.md` 的命令装完，`python -m evaluation.main` 直接 `ModuleNotFoundError`。
-
-**建议**：加 `requirements-eval.txt`（numpy、scikit-learn、matplotlib、datasets），并在块 2 README 写清。
+评测脚本使用同目录导入。从 `evaluation/` 运行 `../.venv/bin/python main.py`，Windows 使用 `..\.venv\Scripts\python.exe -X utf8 main.py`。完整脚本会下载数据并重写 `evaluation/data/`。验证依赖时运行 README 中的离线测试。
 
 ---
 
@@ -154,7 +156,7 @@ torch 相关。而 `evaluation/metrics.py` 需要 **numpy / scikit-learn / matpl
 | headless 环境可能崩 | `metrics.py:3,127` | 没有 `matplotlib.use("Agg")`，Slurm/无 DISPLAY 环境有风险 |
 | 死代码 | `metrics.py:122` | `type(self)` 无作用 |
 | 延迟口径未注明 | `deployment/README.md:90` | 计时从**取得推理锁之后**开始，不含排队；并发/吞吐必须另测 |
-| T10 只能在 prompt 层扰动 | `protocol.py:35-40`；`server.py:16-24` | `render_prompt` 固定渲染 `[options]`，Pydantic `extra="forbid"` 也不接受自定义 options，所以改名/换序只能改 question 文本。已在 `block3/README.md` 写成 assumption，需要块 1 确认是否要加 `options` 入参 |
+| T10 自定义选项 | `deployment/`、`block3/` | 接口已支持 `choice`，三种选项探针直接改动选项块，按稳定 ID 汇总，正式评测待运行。见 [T10 运行说明](block3/README.md#t10--四类对抗探针)。 |
 
 ---
 
@@ -162,7 +164,7 @@ torch 相关。而 `evaluation/metrics.py` 需要 **numpy / scikit-learn / matpl
 
 1. **T9 换校准协议**：按 PLAN §2.3 改成 held_out 拟合、eval 报告（需要先补 held_out 的预测）。
 2. **`score` 全部挂起**：等块 2 换数据后重跑 T9 的 score 分支和 T10 的 score 探针。
-3. **T10 真实模型对比还没跑**：`noul` 四类探针现在就能跑，`score` 分支等数据。
+3. **T10 正式对比待运行**：先跑 `noul` 来源任务，`score` 分支等数据。
 4. `block3/outputs/` 已 gitignore；`block3/README.md` 的"真实运行结果"一节里有全部实测数字。
 
 ## 复现命令

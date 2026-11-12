@@ -5,9 +5,9 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Response
-from pydantic import BaseModel, ConfigDict, field_validator
+from pydantic import BaseModel, ConfigDict, Field, computed_field, field_validator, model_validator
 
-from .protocol import DecisionType, InferenceOutOfMemory, InputTooLong, ModelName, Prediction
+from .protocol import DecisionType, InferenceOutOfMemory, InputTooLong, ModelName, decision_labels
 from .runtime import DEFAULT_CACHE_DIR, DEFAULT_MAX_INPUT_TOKENS, Runtime
 
 
@@ -17,6 +17,9 @@ class PredictRequest(BaseModel):
     type: DecisionType
     text: str
     prompt: str
+    options: list[dict[str, str]] | None = Field(
+        default=None, description="Ordered choice options, each containing id and text."
+    )
 
     @field_validator("text", "prompt")
     @classmethod
@@ -24,6 +27,28 @@ class PredictRequest(BaseModel):
         if not value.strip():
             raise ValueError("Must contain non-whitespace text.")
         return value
+
+    @model_validator(mode="after")
+    def validate_options(self):
+        decision_labels(self.type, self.options)
+        return self
+
+
+class PredictResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    decision: str | int
+    prob: dict[str, float]
+    logits: dict[str, float]
+    latency_ms: float = Field(description="Service time in milliseconds, excluding lock wait.")
+
+    @computed_field(
+        json_schema_extra={"deprecated": True},
+        description="Legacy alias of latency_ms, also in milliseconds.",
+    )
+    @property
+    def latency(self) -> float:
+        return self.latency_ms
 
 
 def create_app(load_runtime, *, audit_inputs: bool = False) -> FastAPI:
@@ -39,10 +64,10 @@ def create_app(load_runtime, *, audit_inputs: bool = False) -> FastAPI:
         return app.state.runtime.health()
 
     @app.post("/v1/{model}/predict")
-    def predict(model: ModelName, body: PredictRequest, response: Response) -> Prediction:
+    def predict(model: ModelName, body: PredictRequest, response: Response) -> PredictResponse:
         try:
             prediction, token_ids = app.state.runtime.predict(
-                model, body.type, body.text, body.prompt
+                model, body.type, body.text, body.prompt, options=body.options
             )
         except InputTooLong as error:
             raise HTTPException(status_code=413, detail=str(error)) from error
@@ -52,7 +77,7 @@ def create_app(load_runtime, *, audit_inputs: bool = False) -> FastAPI:
             encoded = json.dumps(token_ids, separators=(",", ":")).encode("ascii")
             response.headers["X-Input-Token-SHA256"] = hashlib.sha256(encoded).hexdigest()
             response.headers["X-Input-Token-Count"] = str(len(token_ids))
-        return prediction
+        return PredictResponse.model_validate(prediction)
 
     return app
 

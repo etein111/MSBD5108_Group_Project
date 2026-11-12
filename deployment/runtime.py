@@ -8,7 +8,9 @@ from pathlib import Path
 from threading import Lock
 
 from .protocol import (
+    CHOICE_LETTERS,
     NATIVE_OPTIONS,
+    ChoiceOptions,
     DecisionType,
     InferenceOutOfMemory,
     ModelName,
@@ -96,11 +98,10 @@ class Runtime:
         self.head_weight = head["proj.weight"].to(self.device, dtype=torch.float32)
         self.head_bias = head["proj.bias"].to(self.device, dtype=torch.float32)
         config = json.loads((snapshot / "judge_config.json").read_text(encoding="utf-8"))
-        self.slots = {
-            kind: slice(*config["slots"]["ranges"][kind]) for kind in NATIVE_OPTIONS
-        }
+        verbalizers = {**NATIVE_OPTIONS, "choice": CHOICE_LETTERS}
+        self.slots = {kind: slice(*config["slots"]["ranges"][kind]) for kind in verbalizers}
         self.verbalizer_ids = {}
-        for kind, options in NATIVE_OPTIONS.items():
+        for kind, options in verbalizers.items():
             token_ids = config["verbalizer_ids"][self.slots[kind]]
             if [self.tokenizer.encode(option, add_special_tokens=False) for option in options] != [
                 [token_id] for token_id in token_ids
@@ -118,12 +119,13 @@ class Runtime:
         }
 
     def predict(
-        self, model: ModelName, kind: DecisionType, text: str, prompt: str
+        self, model: ModelName, kind: DecisionType, text: str, prompt: str,
+        options: ChoiceOptions | None = None,
     ) -> tuple[Prediction, list[int]]:
         with self.lock, self.torch.inference_mode():
             started = time.perf_counter()
             token_ids = self.tokenizer.encode(
-                render_prompt(kind, text, prompt), add_special_tokens=False,
+                render_prompt(kind, text, prompt, options), add_special_tokens=False,
                 truncation=False, verbose=False,
             )
             validate_token_count(len(token_ids), self.max_input_tokens)
@@ -133,6 +135,8 @@ class Runtime:
                     hidden = self.base.model(input_ids=input_ids, use_cache=False)
                     last = hidden.last_hidden_state[0, -1].float()
                     slots = self.slots[kind]
+                    if options is not None:
+                        slots = slice(slots.start, slots.start + len(options))
                     scores = self.head_weight[slots] @ last + self.head_bias[slots]
                     temperature = self.temperatures[kind]
                 else:
@@ -140,16 +144,19 @@ class Runtime:
                         output = self.base(
                             input_ids=input_ids, use_cache=False, logits_to_keep=1
                         )
-                    scores = output.logits[0, -1].index_select(0, self.verbalizer_ids[kind])
+                    ids = self.verbalizer_ids[kind]
+                    if options is not None:
+                        ids = ids[:len(options)]
+                    scores = output.logits[0, -1].index_select(0, ids)
                     temperature = 1.0
                 # Copying to CPU synchronizes the GPU work before we stop the timer.
-                decision, prob, logits = format_scores(kind, scores.float().tolist(), temperature)
+                decision, prob, logits = format_scores(kind, scores.float().tolist(), temperature, options)
             except self.torch.cuda.OutOfMemoryError:
                 raise InferenceOutOfMemory(
                     "GPU ran out of memory. Free VRAM or lower the shared input limit."
                 ) from None
-            latency = (time.perf_counter() - started) * 1000
-            return Prediction(decision, prob, logits, latency), token_ids
+            latency_ms = (time.perf_counter() - started) * 1000
+            return Prediction(decision, prob, logits, latency_ms), token_ids
 
     def health(self) -> dict:
         cuda = self.torch.cuda

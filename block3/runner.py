@@ -19,7 +19,8 @@ import statistics
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence
 
-from .adapters import JevAdapter, MockAdapter, Prediction, QwenAdapter, load_demonstrations
+from .adapters import JevAdapter, MockAdapter, Prediction, QwenAdapter, load_demonstrations, prompt_for_record
+from .probes import summarize_option_probes
 
 
 def load_records(path: Path) -> List[Dict[str, Any]]:
@@ -31,6 +32,7 @@ def run_adapter(
     records: Sequence[Mapping[str, Any]],
     adapter: Any,
     limit: Optional[int] = None,
+    demonstrations: Sequence[Mapping[str, Any]] = (),
 ) -> List[Dict[str, Any]]:
     """Run one adapter over a JevBench JSONL dataset and return rich records."""
     if not hasattr(adapter, "predict_full"):
@@ -47,18 +49,18 @@ def run_adapter(
             "ground_truth": item["label"],
             "model": getattr(adapter, "model", "unknown"),
         }
-        for key in ("probe", "pair_id", "variant", "direction", "origin_id"):
+        for key in ("probe", "pair_id", "variant", "direction", "origin_id", "source_type"):
             if key in item:
                 record[key] = item[key]
         try:
             prediction: Prediction = adapter.predict_full(
-                item.get("prompt", ""), item["text"], item["type"], item.get("options")
+                prompt_for_record(item, demonstrations), item["text"], item["type"], item.get("options")
             )
             record.update(
                 prediction=prediction.decision,
                 prob=prediction.prob,
                 logits=prediction.logits,
-                latency_ms=prediction.latency,
+                latency_ms=prediction.latency_ms,
                 status="success",
             )
         except Exception as error:  # recorded, not raised: one bad input must not stop a run
@@ -79,7 +81,7 @@ def summarize(results: Sequence[Mapping[str, Any]]) -> Dict[str, Any]:
     by_type: Dict[str, int] = {}
     for record in ok:
         by_type[record["type"]] = by_type.get(record["type"], 0) + 1
-    return {
+    summary = {
         "n": len(results),
         "ok": len(ok),
         "errors": len(results) - len(ok),
@@ -90,6 +92,9 @@ def summarize(results: Sequence[Mapping[str, Any]]) -> Dict[str, Any]:
             "max": round(max(latencies), 2) if latencies else None,
         },
     }
+    if option_probes := summarize_option_probes(results):
+        summary["option_probes"] = option_probes
+    return summary
 
 
 def write_jsonl(path: Path, records: Iterable[Mapping[str, Any]]) -> None:
@@ -99,25 +104,21 @@ def write_jsonl(path: Path, records: Iterable[Mapping[str, Any]]) -> None:
             handle.write(json.dumps(record, ensure_ascii=False) + "\n")
 
 
-def _adapter_for(
-    name: str, base_url: str, demonstrations: Optional[Sequence[Mapping[str, Any]]] = None
-) -> Any:
+def _adapter_for(name: str, base_url: str) -> Any:
     if name == "jev":
         return JevAdapter(base_url)
     if name == "qwen":
-        return QwenAdapter(base_url, demonstrations=demonstrations)
+        return QwenAdapter(base_url)
     if name == "mock":
         return MockAdapter()
     raise ValueError(f"unknown model {name!r}")
 
 
 def _predict(args: argparse.Namespace) -> None:
-    demonstrations = None
-    if args.model == "qwen" and args.shots_file:
-        demonstrations = load_demonstrations(args.shots_file, args.shots_per_type)
-    adapter = _adapter_for(args.model, args.base_url, demonstrations)
+    demonstrations = load_demonstrations(args.shots_file, args.shots_per_type) if args.shots_file else ()
+    adapter = _adapter_for(args.model, args.base_url)
     records = load_records(args.input)
-    results = run_adapter(records, adapter, args.limit)
+    results = run_adapter(records, adapter, args.limit, demonstrations)
     write_jsonl(args.out, results)
     print(json.dumps({"out": str(args.out), **summarize(results)}, indent=2))
 
@@ -164,7 +165,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
     predict.add_argument("--base-url", default="http://127.0.0.1:8000")
     predict.add_argument("--limit", type=int, default=None)
     predict.add_argument("--shots-file", type=Path, default=None,
-                         help="train split used for Qwen few-shot demonstrations")
+                         help="train split used for shared few-shot demonstrations")
     predict.add_argument("--shots-per-type", type=int, default=4)
     predict.set_defaults(handler=_predict)
 

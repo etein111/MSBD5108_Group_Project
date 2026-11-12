@@ -2,20 +2,25 @@
 
 from __future__ import annotations
 
+import io
 import json
 import math
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 import numpy as np
 
 from block3.adapters import (
+    JevAdapter,
     MockAdapter,
     Prediction,
+    QwenAdapter,
     augment_with_shots,
     load_demonstrations,
     normalize_decision,
+    prompt_for_record,
 )
 from block3.calibration import (
     PlattScaler,
@@ -27,7 +32,9 @@ from block3.calibration import (
     probability_matrix,
     run_calibration,
 )
-from block3.probes import PROBES, apply_probe, build_probe_set, write_probe_sets
+from block3.cluster_run import run_model
+from block3.probes import OPTION_PROBES, PROBES, apply_probe, build_probe_set, summarize_option_probes, write_probe_sets
+from deployment.protocol import Prediction as RuntimePrediction, format_scores
 from block3.runner import main as runner_main
 from block3.runner import run_adapter
 from evaluation.harness import JevBenchHarness
@@ -86,6 +93,47 @@ def synthetic_records(kind: str, n: int = 200, overconfidence: float = 1.5, seed
 
 
 class AdapterTests(unittest.TestCase):
+    def test_choice_demonstrations_match_runner_through_direct_call_and_harness(self):
+        record, _ = apply_probe(NOUL_RECORD, "option_renaming")
+        demonstrations = [dict(NOUL_RECORD, text="Training example"), SCORE_RECORD]
+        expected = prompt_for_record(record, demonstrations)
+        self.assertIn("Training example", expected)
+        response = {
+            "decision": "yes", "prob": {"no": 0.2, "yes": 0.8},
+            "logits": {"no": 0, "yes": 1}, "latency_ms": 250,
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "probe.jsonl"
+            path.write_text(json.dumps(record) + "\n", encoding="utf-8")
+            for adapter_cls in (JevAdapter, QwenAdapter):
+                adapter = adapter_cls(demonstrations=demonstrations)
+                with patch("urllib.request.urlopen", side_effect=lambda *args, **kwargs: io.BytesIO(
+                    json.dumps(response).encode("utf-8")
+                )) as urlopen:
+                    adapter.predict_full(
+                        record["prompt"], record["text"], record["type"], record["options"],
+                        source_type=record["source_type"],
+                    )
+                    result, = JevBenchHarness(str(path), adapter).run()
+                    self.assertEqual(result["status"], "success")
+                    self.assertEqual(len(urlopen.call_args_list), 2)
+                    for call in urlopen.call_args_list:
+                        payload = json.loads(call.args[0].data)
+                        self.assertEqual(payload["prompt"], expected)
+                        self.assertEqual(payload["options"], record["options"])
+
+    def test_latency_payload_compatibility(self):
+        for kind, decision, prob in (("noul", "yes", {"no": 0.3, "yes": 0.7}),
+                                     ("score", 2, {str(i): float(i == 2) for i in range(6)})):
+            for timing in ({"latency": 250.0}, {"latency_ms": 250.0},
+                           {"latency_ms": 250.0, "latency": 999.0}):
+                with self.subTest(kind=kind, timing=timing):
+                    prediction = Prediction.from_payload(
+                        {"decision": decision, "prob": prob, "logits": prob, **timing}, kind
+                    )
+                    self.assertEqual(prediction.latency_ms, 250.0)
+                    self.assertEqual(prediction.as_harness_tuple()[3], 0.25)
+
     def test_harness_projection(self):
         prediction = Prediction("yes", {"no": 0.3, "yes": 0.7}, {"no": -1.0, "yes": 1.0}, 250.0)
         decision, confidence, logits, latency_seconds = prediction.as_harness_tuple()
@@ -156,21 +204,59 @@ class AdapterTests(unittest.TestCase):
 
 
 class ProbeTests(unittest.TestCase):
+    def test_score_renaming_uses_the_same_option_neutral_question(self):
+        record = dict(SCORE_RECORD, prompt="Rate the toxicity level of this text from 0 to 5:")
+        original, renamed = apply_probe(record, "option_renaming")
+        self.assertEqual(original["prompt"], "Select the option that best describes the toxicity level of this text.")
+        self.assertEqual(renamed["prompt"], original["prompt"])
+        self.assertEqual([option["text"] for option in original["options"]], list("012345"))
+        self.assertEqual([option["id"] for option in renamed["options"]], list("012345"))
+        self.assertNotEqual(renamed["options"], original["options"])
+        self.assertEqual(apply_probe(record, "option_order_permutation")[0]["prompt"], record["prompt"])
+
+    def test_cluster_probe_summary_only_counts_selected_pairs_on_resume(self):
+        class FakeRuntime:
+            def predict(self, model, kind, text, prompt, options=None):
+                decision, prob, logits = format_scores(kind, list(range(len(options))), 1, options)
+                return RuntimePrediction(decision, prob, logits, 3), []
+
+        probe = "option_renaming"
+        records = build_probe_set([NOUL_RECORD, dict(NOUL_RECORD, id="other")], probes=[probe])
+        with tempfile.TemporaryDirectory() as temp:
+            output = Path(temp) / "jev.jsonl"
+            first = run_model(FakeRuntime(), "jev", records, output, [])
+            resumed = run_model(FakeRuntime(), "jev", records[:2], output, [])
+            self.assertEqual(first["option_probes"][probe]["noul"]["pairs_complete"], 2)
+            self.assertEqual(resumed["ran"], 0)
+            self.assertEqual(resumed["option_probes"][probe]["noul"]["pairs_observed"], 1)
+            self.assertEqual(resumed["option_probes"][probe]["noul"]["pairs_complete"], 1)
+            self.assertEqual(len(output.read_text(encoding="utf-8").splitlines()), 4)
+
     def test_each_probe_builds_one_pair(self):
-        for name in PROBES:
-            record = NOUL_RECORD if name != "score_only" else SCORE_RECORD
-            original, perturbed = apply_probe(record, name)
-            self.assertEqual(original["id"] == perturbed["id"], True)
-            if name == "prompt_injection":
-                self.assertIn("Ignore all previous instructions", perturbed["text"])
-                self.assertEqual(original["text"], record["text"])
-            elif name == "abstain_removal":
-                self.assertIn("unsure", original["prompt"])
-                self.assertNotIn("unsure", perturbed["prompt"])
-            elif name == "option_renaming":
-                self.assertIn("unsafe", perturbed["prompt"])
-            elif name == "option_order_permutation":
-                self.assertIn("yes, no", perturbed["prompt"])
+        for record in (NOUL_RECORD, SCORE_RECORD):
+            for name in PROBES:
+                with self.subTest(kind=record["type"], probe=name):
+                    original, perturbed = apply_probe(record, name)
+                    self.assertEqual(original["id"], perturbed["id"])
+                    self.assertEqual(original["prompt"], perturbed["prompt"])
+                    if name == "prompt_injection":
+                        self.assertEqual(original["type"], record["type"])
+                        self.assertNotEqual(original["text"], perturbed["text"])
+                        continue
+                    self.assertEqual(original["type"], perturbed["type"])
+                    self.assertEqual(original["type"], "choice")
+                    self.assertEqual(original["source_type"], record["type"])
+                    self.assertEqual(original["text"], perturbed["text"])
+                    self.assertEqual(original["label"], str(record["label"]))
+                    if name == "abstain_removal":
+                        self.assertEqual(original["options"][:-1], perturbed["options"])
+                        self.assertEqual(original["options"][-1]["id"], "unsure")
+                    elif name == "option_renaming":
+                        self.assertEqual([o["id"] for o in original["options"]],
+                                         [o["id"] for o in perturbed["options"]])
+                        self.assertNotEqual(original["options"], perturbed["options"])
+                    else:
+                        self.assertEqual(original["options"][::-1], perturbed["options"])
 
     def test_probe_set_is_flat_paired_and_runnable(self):
         items = build_probe_set([NOUL_RECORD, SCORE_RECORD])
@@ -191,6 +277,39 @@ class ProbeTests(unittest.TestCase):
             written = write_probe_sets(items, Path(temp))
             self.assertEqual(written["all_pairs"], len(items))
             self.assertTrue((Path(temp) / "prompt_injection.jsonl").exists())
+
+    def test_option_probes_run_and_report_complete_pairs(self):
+        records = build_probe_set([NOUL_RECORD, SCORE_RECORD], probes=sorted(OPTION_PROBES))
+        results = run_adapter(records, MockAdapter())
+        self.assertTrue(all(row["status"] == "success" for row in results))
+        for item, result in zip(records, results):
+            self.assertEqual(set(result["prob"]), {o["id"] for o in item["options"]})
+        summary = summarize_option_probes(results)
+        self.assertEqual(summary["option_renaming"]["noul"]["pairs_complete"], 1)
+        self.assertIn("forced_choice_accuracy", summary["abstain_removal"]["score"])
+        incomplete = summarize_option_probes(results[1:])
+        self.assertEqual(incomplete[records[0]["probe"]]["noul"]["pairs_complete"], 0)
+
+    def test_cluster_passes_choice_options_and_identical_prompts_to_both_models(self):
+        calls = {"jev": [], "qwen": []}
+
+        class FakeRuntime:
+            def predict(self, model, kind, text, prompt, options=None):
+                calls[model].append((kind, text, prompt, options))
+                decision, prob, logits = format_scores(kind, list(range(len(options))), 1, options)
+                return RuntimePrediction(decision, prob, logits, 3), []
+
+        records = build_probe_set([NOUL_RECORD], probes=["abstain_removal"])
+        demos = [dict(NOUL_RECORD, text="A training example")]
+        with tempfile.TemporaryDirectory() as temp:
+            for model in calls:
+                summary = run_model(FakeRuntime(), model, records, Path(temp) / f"{model}.jsonl", demos)
+                metrics = summary["option_probes"]["abstain_removal"]["noul"]
+                self.assertEqual(metrics["abstention_rate"], 1.0)
+                self.assertEqual(metrics["forced_choice_accuracy"], 1.0)
+        self.assertEqual(calls["jev"], calls["qwen"])
+        self.assertEqual(calls["jev"][0][2], calls["jev"][1][2])
+        self.assertIn("A training example", calls["jev"][0][2])
 
 
 class CalibrationTests(unittest.TestCase):
