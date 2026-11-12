@@ -1,0 +1,6 @@
+numpy
+scikit-learn
+matplotlib
+datasets
+brotlicffi>=1.2.1.0
+brotli>=1.2.0
