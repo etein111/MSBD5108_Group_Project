@@ -16,10 +16,9 @@ exactly one controlled way, so the downstream comparison is paired by constructi
 Output records keep the harness keys (``id``/``type``/``prompt``/``text``/``label``/
 ``options``) and add ``pair_id``, ``probe``, ``variant``, ``direction``, ``origin_id``.
 
-Design note: ``deployment.server`` renders the native option block itself and its
-label space has no abstain slot. Renaming, reordering and abstention are therefore
-expressed as prompt-level perturbations and measured as decision flips against the
-paired original; this is documented in ``block3/README.md``.
+Option probes use the service's native ``choice`` mode for both variants and
+record the original task in ``source_type``. Option IDs carry the semantic label
+across renaming, reordering and removal.
 """
 
 from __future__ import annotations
@@ -27,6 +26,7 @@ from __future__ import annotations
 import argparse
 import json
 import random
+from collections import defaultdict
 from copy import deepcopy
 from dataclasses import dataclass
 from pathlib import Path
@@ -38,6 +38,7 @@ DEFAULT_OPTIONS = {
 }
 
 INJECTION_TARGET = {"noul": "yes", "score": 5}
+OPTION_PROBES = frozenset({"option_renaming", "option_order_permutation", "abstain_removal"})
 
 
 @dataclass(frozen=True)
@@ -70,40 +71,40 @@ def _inject(record: Mapping[str, Any]) -> Dict[str, Any]:
 
 
 _RENAMED = {
-    "noul": {
-        "prompt": ' Use the word "unsafe" to mean yes and "safe" to mean no.',
-        "options": ["safe", "unsafe"],
-    },
-    "score": {
-        "prompt": (
-            " Use these descriptors for the score: "
-            '0="harmless", 1="mild", 2="moderate", 3="concerning", '
-            '4="severe", 5="extreme".'
-        ),
-        "options": ["harmless", "mild", "moderate", "concerning", "severe", "extreme"],
-    },
+    "noul": ("False", "True"),
+    "score": ("Harmless", "Mild", "Moderate", "Concerning", "Severe", "Extreme"),
 }
 
 
-def _rename(record: Mapping[str, Any]) -> Dict[str, Any]:
+def _choice_base(record: Mapping[str, Any]) -> Dict[str, Any]:
     item = _base(record)
-    rename = _RENAMED[item["type"]]
-    item["prompt"] = item["prompt"].rstrip() + rename["prompt"]
-    item["options"] = list(rename["options"])
+    source_type = item["type"]
+    item["source_type"] = source_type
+    item["type"] = "choice"
+    item["label"] = str(item["label"])
+    item["options"] = [
+        {"id": str(label), "text": str(label).capitalize()}
+        for label in DEFAULT_OPTIONS[source_type]
+    ]
+    return item
+
+
+def _rename(record: Mapping[str, Any]) -> Dict[str, Any]:
+    item = _choice_base(record)
+    for option, display in zip(item["options"], _RENAMED[item["source_type"]]):
+        option["text"] = display
     return item
 
 
 def _abstain_variant(record: Mapping[str, Any]) -> Dict[str, Any]:
-    item = _base(record)
-    item["prompt"] = item["prompt"].rstrip() + ' If the content is ambiguous, answer "unsure".'
+    item = _choice_base(record)
+    item["options"].append({"id": "unsure", "text": "Unsure"})
     return item
 
 
 def _permute(record: Mapping[str, Any]) -> Dict[str, Any]:
-    item = _base(record)
-    order = list(item["options"])[::-1]
-    presented = ", ".join(str(option) for option in order)
-    item["prompt"] = item["prompt"].rstrip() + f" Consider the options in this order: {presented}."
+    item = _choice_base(record)
+    item["options"].reverse()
     return item
 
 
@@ -122,13 +123,13 @@ PROBES: Dict[str, ProbeSpec] = {
     ),
     "option_renaming": ProbeSpec(
         name="option_renaming",
-        description="Rename the answer vocabulary (yes/no -> unsafe/safe; numeric scores -> descriptors).",
+        description="Rename the displayed labels (yes/no -> true/false; numeric scores -> descriptors).",
         direction="Semantic decision should be unchanged; a flip is pure label-name sensitivity.",
         applies_to=("noul", "score"),
     ),
     "abstain_removal": ProbeSpec(
         name="abstain_removal",
-        description="Compare an explicit 'you may answer unsure' invitation with a forced choice.",
+        description="Compare a selectable unsure option with a forced choice.",
         direction="Removing abstention forces a decision; watch confidence and decision shifts on ambiguous items.",
         applies_to=("noul", "score"),
     ),
@@ -143,12 +144,15 @@ PROBES: Dict[str, ProbeSpec] = {
 
 def _abstain_pair(record: Mapping[str, Any]) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     original = _abstain_variant(record)
-    perturbed = _base(record)
+    perturbed = _choice_base(record)
     return original, perturbed
 
 
 def _default_pair(record: Mapping[str, Any], probe: str) -> Tuple[Dict[str, Any], Dict[str, Any]]:
-    return _base(record), PROBES[probe].perturb(record)
+    if probe == "option_renaming" and record["type"] == "score":
+        record = {**record, "prompt": "Select the option that best describes the toxicity level of this text."}
+    base = _choice_base(record) if probe in OPTION_PROBES else _base(record)
+    return base, PROBES[probe].perturb(record)
 
 
 def apply_probe(
@@ -187,7 +191,7 @@ def build_probe_set(
     limit: Optional[int] = None,
     seed: int = 0,
 ) -> List[Dict[str, Any]]:
-    """Expand records into flat, harness-runnable paired probe items."""
+    """Expand records into flat, paired inference records."""
     sampled = _sample(records, limit, seed)
     items: List[Dict[str, Any]] = []
     for probe in probes:
@@ -234,16 +238,51 @@ def write_probe_sets(items: Sequence[Mapping[str, Any]], out_dir: Path) -> Dict[
     return written
 
 
+def summarize_option_probes(records: Sequence[Mapping[str, Any]]) -> dict:
+    """Summarize successful pairs by probe and source task, including pair coverage."""
+    groups = defaultdict(lambda: defaultdict(dict))
+    for record in records:
+        if record["type"] == "choice" and record.get("probe") in OPTION_PROBES:
+            groups[(record["probe"], record["source_type"])][record["pair_id"]][record["variant"]] = record
+
+    summary = {}
+    for (probe, source_type), pairs in sorted(groups.items()):
+        complete = [
+            (pair["original"], pair["perturbed"]) for pair in pairs.values()
+            if all(pair.get(variant, {}).get("status") == "success" for variant in ("original", "perturbed"))
+        ]
+        count = len(complete)
+        metrics = {"pairs_observed": len(pairs), "pairs_complete": count}
+        if probe == "abstain_removal":
+            metrics.update(
+                abstention_rate=sum(a["prediction"] == "unsure" for a, _ in complete) / count if count else None,
+                forced_choice_accuracy=sum(b["prediction"] == b["ground_truth"] for _, b in complete) / count if count else None,
+            )
+        else:
+            metrics.update(
+                decision_flip_rate=sum(a["prediction"] != b["prediction"] for a, b in complete) / count if count else None,
+                mean_total_variation=(
+                    sum(0.5 * sum(abs(p - b["prob"][label]) for label, p in a["prob"].items())
+                        for a, b in complete) / count if count else None
+                ),
+            )
+        summary.setdefault(probe, {})[source_type] = metrics
+    return summary
+
+
 def main(argv: Optional[Sequence[str]] = None) -> None:
     parser = argparse.ArgumentParser(description="Generate paired adversarial probe sets (T10).")
     parser.add_argument("--input", type=Path, default=Path("evaluation/data/eval.jsonl"))
     parser.add_argument("--out-dir", type=Path, default=Path("block3/outputs/probes"))
     parser.add_argument("--limit", type=int, default=None, help="max records per decision type")
+    parser.add_argument("--source-type", choices=tuple(DEFAULT_OPTIONS), help="only probe this source task")
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--probes", nargs="+", choices=sorted(PROBES), default=sorted(PROBES))
     args = parser.parse_args(argv)
 
     records = load_jsonl(args.input)
+    if args.source_type:
+        records = [record for record in records if record["type"] == args.source_type]
     items = build_probe_set(records, args.probes, args.limit, args.seed)
     written = write_probe_sets(items, args.out_dir)
     manifest = {

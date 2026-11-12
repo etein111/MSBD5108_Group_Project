@@ -36,14 +36,15 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Mapping, Optional, Sequence
 
-OUTPUT_LABELS: Dict[str, tuple] = {
-    "noul": ("no", "yes"),
-    "score": tuple(str(level) for level in range(6)),
-}
+from deployment.protocol import OUTPUT_LABELS, decision_labels
 
 
 def normalize_decision(task_type: str, decision: Any) -> Any:
     """Coerce the service's decision into the label space used by the datasets."""
+    if task_type == "choice":
+        if not isinstance(decision, str) or not decision.strip():
+            raise ValueError("choice decision must be a nonblank option ID")
+        return decision
     if task_type == "score":
         value = int(decision)
         if not 0 <= value <= 5:
@@ -69,9 +70,14 @@ class Prediction:
             decision=normalize_decision(task_type, obj["decision"]),
             prob={label: float(value) for label, value in obj["prob"].items()},
             logits={label: float(value) for label, value in obj["logits"].items()},
-            latency=float(obj["latency"]),
+            latency=float(obj["latency_ms"] if "latency_ms" in obj else obj["latency"]),
             model=model,
         )
+
+    @property
+    def latency_ms(self) -> float:
+        """Service time in milliseconds; ``latency`` is the legacy alias."""
+        return self.latency
 
     @property
     def confidence(self) -> float:
@@ -80,7 +86,7 @@ class Prediction:
 
     def as_harness_tuple(self) -> tuple:
         """``(decision, P(decision), logits, latency_seconds)``."""
-        return self.decision, self.confidence, dict(self.logits), self.latency / 1000.0
+        return self.decision, self.confidence, dict(self.logits), self.latency_ms / 1000.0
 
 
 class HttpAdapter:
@@ -88,9 +94,15 @@ class HttpAdapter:
 
     model = ""
 
-    def __init__(self, base_url: str = "http://127.0.0.1:8000", timeout: float = 300.0):
+    def __init__(
+        self,
+        base_url: str = "http://127.0.0.1:8000",
+        timeout: float = 300.0,
+        demonstrations: Optional[Sequence[Mapping[str, Any]]] = None,
+    ):
         self.base_url = base_url.rstrip("/")
         self.timeout = timeout
+        self.demonstrations = list(demonstrations or [])
 
     def predict_full(
         self,
@@ -98,11 +110,16 @@ class HttpAdapter:
         text: str,
         task_type: str,
         options: Optional[Sequence[Any]] = None,
+        *,
+        source_type: Optional[str] = None,
     ) -> Prediction:
-        # The service derives the native option set from ``type``. ``options`` is
-        # accepted only so this method is drop-in compatible with the harness;
-        # renaming/reordering is exercised through the prompt instead (T10).
+        prompt = prompt_for_record(
+            {"prompt": prompt, "type": task_type, "source_type": source_type},
+            self.demonstrations,
+        )
         payload = {"type": task_type, "text": text, "prompt": prompt}
+        if task_type == "choice":
+            payload["options"] = options
         request = urllib.request.Request(
             f"{self.base_url}/v1/{self.model}/predict",
             data=json.dumps(payload).encode("utf-8"),
@@ -119,7 +136,12 @@ class HttpAdapter:
                 f"[{self.model}] cannot reach {self.base_url} — start it with "
                 f"`python -m deployment.server` ({error.reason})"
             ) from error
-        return Prediction.from_payload(body, task_type, self.model)
+        prediction = Prediction.from_payload(body, task_type, self.model)
+        if task_type == "choice":
+            labels = set(decision_labels(task_type, options))
+            if set(prediction.prob) != labels or set(prediction.logits) != labels or prediction.decision not in labels:
+                raise ValueError("Choice response labels differ from the requested option IDs.")
+        return prediction
 
     def predict(
         self,
@@ -127,8 +149,17 @@ class HttpAdapter:
         text: str,
         task_type: str,
         options: Optional[Sequence[Any]] = None,
+        *,
+        source_type: Optional[str] = None,
     ) -> tuple:
-        return self.predict_full(prompt, text, task_type, options).as_harness_tuple()
+        return self.predict_full(prompt, text, task_type, options, source_type=source_type).as_harness_tuple()
+
+    def predict_record(self, item: Mapping[str, Any]) -> tuple:
+        """Preserve source-task metadata when called by the evaluation harness."""
+        return self.predict(
+            item.get("prompt", ""), item["text"], item["type"], item.get("options"),
+            source_type=item.get("source_type"),
+        )
 
 
 class JevAdapter(HttpAdapter):
@@ -138,56 +169,41 @@ class JevAdapter(HttpAdapter):
 
 
 class QwenAdapter(HttpAdapter):
-    """T7: Qwen3.5-9B adapter — few-shot constrained decoding, logit probabilities.
-
-    Constrained decoding lives in the service (the readout is restricted to the
-    native option tokens). The few-shot half lives here: demonstrations from the
-    *train* split are prepended to the question, never to JEV's prompt, so the
-    only difference between the two models is the treatment the protocol assigns
-    to the general-purpose baseline.
-    """
+    """T7: Qwen3.5-9B adapter — constrained decoding and logit probabilities."""
 
     model = "qwen"
-
-    def __init__(
-        self,
-        base_url: str = "http://127.0.0.1:8000",
-        timeout: float = 300.0,
-        demonstrations: Optional[Sequence[Mapping[str, Any]]] = None,
-    ):
-        super().__init__(base_url, timeout)
-        self.demonstrations = list(demonstrations or [])
-
-    def predict_full(
-        self,
-        prompt: str,
-        text: str,
-        task_type: str,
-        options: Optional[Sequence[Any]] = None,
-    ) -> Prediction:
-        return super().predict_full(augment_with_shots(prompt, task_type, self.demonstrations), text, task_type, options)
 
 
 def native_label(task_type: str, label: Any) -> str:
     """Map dataset labels onto the tokens the service constrains decoding to."""
     if task_type == "noul":
         return "true" if str(label).strip().lower() == "yes" else "false"
-    return str(int(label))
+    return str(label) if task_type == "choice" else str(int(label))
 
 
 def augment_with_shots(
-    prompt: str, task_type: str, demonstrations: Sequence[Mapping[str, Any]]
+    prompt: str, task_type: str, demonstrations: Sequence[Mapping[str, Any]], *,
+    semantic_labels: bool = False,
 ) -> str:
     """Prepend same-type demonstrations to the question; empty list is a no-op."""
     demos = [demo for demo in demonstrations if demo.get("type") == task_type]
     if not demos:
         return prompt
-    lines = ["Examples (text -> answer):"]
+    lines = ["Examples (text -> semantic answer):" if semantic_labels else "Examples (text -> answer):"]
     for demo in demos:
-        lines.append(f"- {json.dumps(str(demo['text']))} -> {native_label(task_type, demo['label'])}")
+        label = str(demo["label"]) if semantic_labels else native_label(task_type, demo["label"])
+        lines.append(f"- {json.dumps(str(demo['text']))} -> {label}")
     lines.extend(["", "Now answer the actual question."])
     lines.append(prompt)
     return "\n".join(lines)
+
+
+def prompt_for_record(item: Mapping[str, Any], demonstrations: Sequence[Mapping[str, Any]]) -> str:
+    """Use source-task examples for choice without tying them to option letters."""
+    return augment_with_shots(
+        item.get("prompt", ""), item.get("source_type") or item["type"], demonstrations,
+        semantic_labels=item["type"] == "choice",
+    )
 
 
 def load_demonstrations(path: Path, per_type: int = 4) -> list:
@@ -225,11 +241,13 @@ class MockAdapter:
         digest = hashlib.sha256(
             f"{self.model}|{self.seed}|{task_type}|{text}".encode("utf-8")
         ).digest()
-        labels = OUTPUT_LABELS[task_type]
+        labels = decision_labels(task_type, options if task_type == "choice" else None)
         if task_type == "noul":
             decision: Any = "yes" if digest[0] & 1 else "no"
-        else:
+        elif task_type == "score":
             decision = digest[0] % 6
+        else:
+            decision = labels[digest[0] % len(labels)]
         strength = 2.0 + (digest[1] / 255.0) * 3.0
         logits = {
             label: strength if str(decision) == label else -(digest[2 + i] / 255.0)

@@ -28,7 +28,8 @@ import time
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence
 
-from .adapters import augment_with_shots, load_demonstrations
+from .adapters import load_demonstrations, prompt_for_record
+from .probes import summarize_option_probes
 
 
 def load_jsonl(path: Path) -> List[Dict[str, Any]]:
@@ -74,9 +75,7 @@ def run_model(runtime, model: str, records, out_path: Path, demonstrations) -> D
     started = time.time()
     with out_path.open("a", encoding="utf-8") as handle:
         for index, item in enumerate(pending, start=1):
-            prompt = item.get("prompt", "")
-            if model == "qwen":
-                prompt = augment_with_shots(prompt, item["type"], demonstrations)
+            kind = item["type"]
             record: Dict[str, Any] = {
                 "id": item["id"],
                 "type": item["type"],
@@ -84,21 +83,22 @@ def run_model(runtime, model: str, records, out_path: Path, demonstrations) -> D
                 "ground_truth": item["label"],
                 "model": model,
             }
-            for key in ("probe", "pair_id", "variant", "direction", "origin_id"):
+            for key in ("probe", "pair_id", "variant", "direction", "origin_id", "source_type"):
                 if key in item:
                     record[key] = item[key]
             try:
                 prediction, _token_ids = runtime.predict(
-                    model, item["type"], item["text"], prompt
+                    model, kind, item["text"], prompt_for_record(item, demonstrations),
+                    options=item.get("options") if kind == "choice" else None,
                 )
                 record.update(
                     prediction=prediction.decision,
                     prob=prediction.prob,
                     logits=prediction.logits,
-                    latency_ms=prediction.latency,
+                    latency_ms=prediction.latency_ms,
                     status="success",
                 )
-                latencies.append(prediction.latency)
+                latencies.append(prediction.latency_ms)
             except Exception as error:  # one bad input must not kill the batch
                 failures += 1
                 record.update(
@@ -130,6 +130,10 @@ def run_model(runtime, model: str, records, out_path: Path, demonstrations) -> D
         "wall_minutes": round((time.time() - started) / 60, 2),
         "out": str(out_path),
     }
+    if any(record["type"] == "choice" and "probe" in record for record in records):
+        selected_ids = {record["id"] for record in records}
+        selected_results = [row for row in load_jsonl(out_path) if row["id"] in selected_ids]
+        summary["option_probes"] = summarize_option_probes(selected_results)
     print(json.dumps(summary, indent=2), flush=True)
     return summary
 

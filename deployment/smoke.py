@@ -7,7 +7,7 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
-from .protocol import OUTPUT_LABELS, format_scores, render_prompt
+from .protocol import decision_labels, format_scores, render_prompt
 from .runtime import DEFAULT_CACHE_DIR, REVISION, resolve_snapshot
 
 MODELS = ("jev", "qwen")
@@ -23,6 +23,15 @@ EXAMPLES = (
         "text": "Your idea is stupid, and you're a complete idiot.",
         "prompt": "Rate the toxicity from 0 (none) to 5 (severe abuse or threats).",
     },
+)
+CHOICE_OPTIONS = [{"id": "no", "text": "No"}, {"id": "yes", "text": "Yes"}]
+CHOICE_EXAMPLES = tuple(
+    {**EXAMPLES[0], "type": "choice", "options": options}
+    for options in (
+        CHOICE_OPTIONS,
+        CHOICE_OPTIONS[::-1],
+        CHOICE_OPTIONS + [{"id": "unsure", "text": "Unsure"}],
+    )
 )
 
 
@@ -60,7 +69,8 @@ def near_limit_payload(cache_dir, limit):
 
 def check_pair(port, payload, temperatures):
     kind = payload["type"]
-    labels = OUTPUT_LABELS[kind]
+    options = payload.get("options")
+    labels = decision_labels(kind, options)
     results = {}
     fingerprints = set()
     counts = set()
@@ -70,10 +80,11 @@ def check_pair(port, payload, temperatures):
         counts.add(int(headers["X-Input-Token-Count"]))
         assert set(response["prob"]) == set(response["logits"]) == set(labels), response
         assert math.isclose(math.fsum(response["prob"].values()), 1.0), response
-        assert math.isfinite(response["latency"]) and response["latency"] > 0, response
+        assert math.isfinite(response["latency_ms"]) and response["latency_ms"] > 0, response
+        assert response["latency"] == response["latency_ms"], response
         temperature = temperatures[kind] if model == "jev" else 1.0
         decision, prob, _ = format_scores(
-            kind, [response["logits"][label] for label in labels], temperature
+            kind, [response["logits"][label] for label in labels], temperature, options
         )
         assert type(response["decision"]) is type(decision) and response["decision"] == decision
         for label in labels:
@@ -91,11 +102,14 @@ def main():
     health, _ = request_json(args.port, "/health")
     assert health["status"] == "ready" and health["revision"] == REVISION, health
     # This fixture pins the temperatures of the deployed release independently of the server.
-    temperatures = {"noul": 1.0022178236691426, "score": 1.012184473350984}
-    for example in EXAMPLES:
+    temperatures = {
+        "noul": 1.0022178236691426, "score": 1.012184473350984, "choice": 0.9840233476014968,
+    }
+    cases = EXAMPLES + CHOICE_EXAMPLES
+    for example in cases:
         check_pair(args.port, example, temperatures)
     examples = [
-        {"request": example, **check_pair(args.port, example, temperatures)} for example in EXAMPLES
+        {"request": example, **check_pair(args.port, example, temperatures)} for example in cases
     ]
 
     limit = health["max_input_tokens"]

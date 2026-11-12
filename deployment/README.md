@@ -8,6 +8,8 @@
 
 GPU 部署需要支持 BF16 和 CUDA 12.8 的 NVIDIA GPU 及驱动，并预留至少 30 GB 磁盘空间。首次启动下载约 18 GB，默认保存在 `.cache/huggingface/`。可以用 `--cache-dir` 指定其他位置，服务和验收脚本须使用同一路径。
 
+数据准备、评测指标、块 3 校准和绘图需另装 `requirements-eval.txt`（包含基础依赖）。仅运行服务无需安装评测依赖；同机推理与评测需同时安装 CUDA 与评测依赖。安装命令和无需 GPU/下载数据的验证见 [评测环境说明](../evaluation/README)。
+
 ### Windows（PowerShell）
 
 ```powershell
@@ -84,12 +86,36 @@ done
 
 | 字段 | 含义 |
 | --- | --- |
-| `decision` | `noul` 为 `no` 或 `yes`，`score` 为概率最大的整数 `0`–`5`。平局取顺序最靠前的选项。 |
+| `decision` | `noul` 为 `no` 或 `yes`，`score` 为概率最大的整数 `0`–`5`，`choice` 为选项的字符串 ID。平局取当前顺序最靠前的选项。 |
 | `prob` | 按标签索引的完整概率分布。二分类的正类概率取 `prob["yes"]`，评估置信度时取预测标签对应的概率。 |
 | `logits` | 按相同标签索引的原始分数。JEV 的值尚未除以官方温度，Qwen 的值是原始选项 token logits。评分任务的 JSON 对象键是字符串。 |
-| `latency` | 服务内耗时（毫秒），包含 prompt 渲染、分词和 GPU 推理。计时从取得推理锁之后开始。 |
+| `latency_ms` | 服务内耗时（毫秒），包含 prompt 渲染、分词和 GPU 推理。计时从取得推理锁之后开始。新客户端应读取此字段。 |
+| `latency` | 为旧客户端保留的毫秒别名，与 `latency_ms` 完全相同；不是秒。 |
+
+块 3 适配器优先读取 `latency_ms`，连接旧版服务时回退读取 `latency`。传给块 2 harness 的四元组仍使用秒（毫秒除以 1000），预测 JSONL 的 `latency_ms` 保留毫秒。例如服务返回 `250` ms，harness 收到 `0.25` s。旧版客户端仍可读取 `latency`，不需要同步升级。
 
 两个模型收到相同的 token 序列，二分类内部使用 `false/true`，响应映射为 `no/yes`。完整渲染后的输入上限默认是 4,096 tokens，超限返回 HTTP 413。无效请求返回 422，GPU 显存不足返回 503。遇到显存不足时，先释放 GPU 上的其他工作，再用同一 `--max-input-tokens` 限制重测两个模型。`/health` 返回环境信息和 PyTorch 统计的峰值显存。
+
+### T10 自定义选项
+
+向任一模型的 `/v1/{model}/predict` 发送如下 JSON：
+
+```json
+{
+  "type": "choice",
+  "text": "The meeting starts at noon.",
+  "prompt": "Is this message spam?",
+  "options": [
+    {"id": "no", "text": "No"},
+    {"id": "yes", "text": "Yes"},
+    {"id": "unsure", "text": "Unsure"}
+  ]
+}
+```
+
+`options` 仅用于 `choice`，必填且包含 2–16 项。每项的 `id` 和 `text` 必须是非空的单行字符串，`id` 须唯一且无首尾空白。服务按数组顺序将展示文字渲染为 `A) No`、`B) Yes`、`C) Unsure`。JEV 对当前选项使用原生 `choice` 决策头及其温度，Qwen 在相同字母 token 上读 logits 并计算 softmax。返回的 `decision`、`prob` 和 `logits` 都使用请求中的 ID。两模型的输入 token 可以用 `--audit-inputs` 对照。
+
+成对实验应让原始和扰动样本都使用 `choice`，并按 ID 对齐预测。改名时保留 ID，换序时移动整个选项，移除弃权时删除末尾的 `unsure`。主评测使用原生 `noul` 和 `score`。 [生成与运行探针](../block3/README.md#t10--四类对抗探针)
 
 ## 验收
 
@@ -103,7 +129,7 @@ done
 .venv/bin/python -B -m unittest discover -s deployment/tests -v
 ```
 
-真实验收需要重启服务，在对应的启动命令末尾加上 `--audit-inputs`。在另一个终端运行下列命令。脚本预热两种任务，校验概率与 logits 的关系、两路输入 token 的哈希及长度边界，输出四个真实样例结果和显存数据。
+真实验收需要重启服务，在对应的启动命令末尾加上 `--audit-inputs`。在另一个终端运行下列命令。脚本覆盖 `noul`、`score` 及三个 `choice` 请求，校验概率与 logits 的关系、两路输入 token 的哈希及长度边界，并输出两模型的结果和显存数据。
 
 ```powershell
 New-Item -ItemType Directory -Force .cache | Out-Null
