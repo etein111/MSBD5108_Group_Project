@@ -4,9 +4,10 @@ Bridge the local deployment service (``deployment/server.py``) to the evaluation
 harness. Both adapters POST to ``/v1/{model}/predict`` with ``{type, text, prompt}``
 and speak two interfaces:
 
-* ``predict(prompt, text, task_type, options) -> (decision, confidence, logits, latency_seconds)``
+* ``predict(prompt, text, task_type, options) -> (decision, prob, logits, latency_seconds)``
   — the ``evaluation.harness.ModelAdapter`` contract, so an adapter can be passed
-  straight into ``JevBenchHarness``.
+  straight into ``JevBenchHarness``. ``prob`` is the full label distribution, as
+  ``evaluation/metrics.py`` requires.
 * ``predict_full(...) -> Prediction`` — the richer form carrying the full label
   distribution and latency in milliseconds, used by the calibration pipeline (T9).
 
@@ -16,7 +17,7 @@ Schema alignment rule (the one place the two teammate modules disagree):
 field                   deployment (``Prediction``)   harness (``ModelAdapter``)
 ======================  ============================  =============================
 decision                ``"no"/"yes"`` or ``int``      same
-probability             ``prob: dict[label, float]``   scalar ``P(decision)``
+probability             ``prob: dict[label, float]``   same (full distribution)
 logits                  ``logits: dict``               same
 latency                 milliseconds                   seconds
 ======================  ============================  =============================
@@ -85,8 +86,12 @@ class Prediction:
         return float(self.prob[str(self.decision)])
 
     def as_harness_tuple(self) -> tuple:
-        """``(decision, P(decision), logits, latency_seconds)``."""
-        return self.decision, self.confidence, dict(self.logits), self.latency_ms / 1000.0
+        """``(decision, prob, logits, latency_seconds)``.
+
+        ``prob`` is the full label distribution: ``evaluation/metrics.py`` rejects
+        a scalar and needs every class to compute multi-class ECE/Brier.
+        """
+        return self.decision, dict(self.prob), dict(self.logits), self.latency_ms / 1000.0
 
 
 class HttpAdapter:

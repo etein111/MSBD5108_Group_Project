@@ -25,11 +25,17 @@ from block3.adapters import (
 from block3.calibration import (
     PlattScaler,
     TemperatureScaler,
+    balanced_accuracy,
+    binary_auroc,
+    bootstrap_ci,
     cross_fitted,
     evaluate,
     expected_calibration_error,
+    fit_on,
     label_indices,
+    macro_f1,
     probability_matrix,
+    quadratic_weighted_kappa,
     run_calibration,
 )
 from block3.cluster_run import run_model
@@ -136,9 +142,12 @@ class AdapterTests(unittest.TestCase):
 
     def test_harness_projection(self):
         prediction = Prediction("yes", {"no": 0.3, "yes": 0.7}, {"no": -1.0, "yes": 1.0}, 250.0)
-        decision, confidence, logits, latency_seconds = prediction.as_harness_tuple()
+        decision, probability, logits, latency_seconds = prediction.as_harness_tuple()
         self.assertEqual(decision, "yes")
-        self.assertAlmostEqual(confidence, 0.7)
+        # Block 2's metrics require the full distribution, not a scalar.
+        self.assertIsInstance(probability, dict)
+        self.assertEqual(set(probability), {"no", "yes"})
+        self.assertAlmostEqual(probability["yes"], 0.7)
         self.assertAlmostEqual(latency_seconds, 0.25)
         self.assertEqual(set(logits), {"no", "yes"})
 
@@ -165,8 +174,14 @@ class AdapterTests(unittest.TestCase):
         self.assertEqual(len(results), 2)
         for record in results:
             self.assertEqual(record["status"], "success")
-            self.assertIsInstance(record["probability"], float)
-            self.assertTrue(0.0 <= record["probability"] <= 1.0)
+            # Block 2's metrics contract: a full distribution whose argmax is
+            # the decision, not a scalar P(decision).
+            self.assertIsInstance(record["probability"], dict)
+            self.assertAlmostEqual(sum(record["probability"].values()), 1.0)
+            self.assertEqual(
+                str(record["prediction"]),
+                max(record["probability"], key=record["probability"].get),
+            )
         self.assertIsInstance(results[1]["prediction"], int)
 
     def test_few_shot_augmentation_is_type_filtered(self):
@@ -356,6 +371,56 @@ class CalibrationTests(unittest.TestCase):
         self.assertIn("ece_15bin", report.raw)
         self.assertIn("ece_15bin", report.calibrated)
         self.assertEqual(report.raw["n"], 200)
+
+    def test_binary_auroc_matches_hand_computed_values(self):
+        self.assertEqual(binary_auroc(np.array([0.1, 0.2, 0.8, 0.9]), np.array([0, 0, 1, 1])), 1.0)
+        self.assertEqual(binary_auroc(np.array([0.9, 0.8, 0.2, 0.1]), np.array([0, 0, 1, 1])), 0.0)
+        # One positive and one negative tied at the same score -> 0.5.
+        self.assertEqual(binary_auroc(np.array([0.5, 0.5]), np.array([0, 1])), 0.5)
+
+    def test_macro_f1_and_balanced_accuracy_are_not_accuracy(self):
+        labels = np.array([0, 1, 0, 1])
+        predictions = np.array([0, 1, 1, 1])  # class 0: P=1.0 R=0.5; class 1: P=2/3 R=1.0
+        self.assertAlmostEqual(macro_f1(predictions, labels, 2), (0.8 + 2 / 3) / 2)
+        self.assertAlmostEqual(balanced_accuracy(predictions, labels, 2), 0.75)
+        self.assertAlmostEqual(float((predictions == labels).mean()), 0.75)
+
+        # A majority-class-only predictor looks good on accuracy but not here.
+        tilted_labels = np.array([0] * 9 + [1])
+        tilted_predictions = np.zeros(10, dtype=int)
+        self.assertAlmostEqual(float((tilted_predictions == tilted_labels).mean()), 0.9)
+        self.assertAlmostEqual(balanced_accuracy(tilted_predictions, tilted_labels, 2), 0.5)
+        self.assertAlmostEqual(macro_f1(tilted_predictions, tilted_labels, 2), (18 / 19) / 2)
+
+    def test_quadratic_weighted_kappa_is_one_for_perfect_ordinal_predictions(self):
+        labels = np.array([0, 1, 2, 3, 4, 5])
+        self.assertAlmostEqual(quadratic_weighted_kappa(labels, labels, 6), 1.0)
+        self.assertLess(quadratic_weighted_kappa(np.array([0, 0, 0, 0, 0, 0]), labels, 6), 0.3)
+
+    def test_bootstrap_intervals_bracket_the_point_estimate(self):
+        records = synthetic_records("noul", n=160)
+        labels = label_indices(records, "noul")
+        probs = probability_matrix(records, "noul")
+        intervals = bootstrap_ci(probs, labels, "noul", n_boot=200, seed=0)
+        for key in ("ece_15bin", "brier", "auroc", "macro_f1"):
+            lower, upper = intervals[key]
+            self.assertLessEqual(lower, upper)
+        self.assertIn("ece_15bin", intervals)
+
+    def test_held_out_fit_uses_only_the_fit_split(self):
+        fit_records = synthetic_records("noul", n=120, seed=1)
+        eval_records = synthetic_records("noul", n=80, seed=2)
+        calibrated, params = fit_on(fit_records, eval_records, "noul", "platt")
+        expected = PlattScaler().fit(
+            probability_matrix(fit_records, "noul")[:, 1], label_indices(fit_records, "noul")
+        )
+        self.assertAlmostEqual(params["a"], expected.a)
+        self.assertAlmostEqual(params["b"], expected.b)
+        np.testing.assert_allclose(calibrated.sum(axis=1), 1.0)
+
+        report = evaluate(eval_records, "noul", "mock", fit_records=fit_records, n_boot=50)
+        self.assertEqual(report.protocol, "held_out_fit")
+        self.assertEqual(report.n_folds, 0)
 
     def test_end_to_end_report_and_plot(self):
         records = synthetic_records("noul", n=120) + synthetic_records("score", n=120)

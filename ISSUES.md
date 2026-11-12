@@ -20,6 +20,24 @@
 
 ---
 
+## 状态更新（2026-11-13，对照 `origin/main` c7a2f00）
+
+| # | 状态 | 证据 |
+| --- | --- | --- |
+| 1 | **已修** | `data_pipeline.py` 的 `score` 改为 Jigsaw 五个子类标签求和（0–5），prompt 同步改成"Count the applicable toxicity categories"；`subtype_labels`/`toxic_label` 原样保留。 |
+| 2 | **已修** | `noul` 现在来自 `sms_spam` + `enron_spam` + `phishing_email` 三个源（eval: 325/303/345 条），任一源缺失会直接报错而不是静默降级。 |
+| 3 | **已修 + 待用** | 切分前按 `(type, text)` 去重；实测 train∩eval、train∩held_out、held_out∩eval 的相同文本均为 **0**。`held_out` 仍无仓库内消费者，但块 3 已加 `--fit-dir` 支持 PLAN §2.3 协议，只差一次 GPU 预测。 |
+| 4 | **已修** | harness 契约改为完整 `prob` dict；`metrics.py` 会校验 `sum≈1`、`decision==argmax`，并计算多分类 Brier/ECE。块 3 适配器已跟随（本分支）。 |
+| 5 | **已修** | `metrics.py` 增加 AUROC、balanced accuracy、macro-F1 与 `by_source` 分组。 |
+| 6 | **已修** | 增加 bootstrap 95% CI、exact McNemar、score 的配对置换检验、p50/p95、`gpu_seconds_per_1000`。 |
+| 7 | **已修** | `Prediction.latency_ms` 为准，`latency` 保留为毫秒别名；服务响应同时给两个字段。 |
+| 8 | **已修** | 新增 `requirements-eval.txt`（根目录与 `evaluation/` 各一份），声明 numpy / scikit-learn / matplotlib / datasets。 |
+| 9 | **大部分已修** | `matplotlib.use("Agg")` 已加、Mock 看板移到 `evaluation/outputs/`、`type(self)` 死代码已删；仅剩 `deployment/server.py:60` 的 `MSBD5108` 课程号未改。 |
+
+结论：块 1/2 的 P0、P1 均已修复，块 3 可以按新契约继续；旧数字全部作废，需在新数据上重跑。
+
+---
+
 ## P0 — 影响结论正确性
 
 ### 1. `score` 的标签与任务无关

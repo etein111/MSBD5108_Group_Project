@@ -62,7 +62,7 @@ Prediction(decision, prob: dict[str, float], logits: dict[str, float], latency_m
 | 字段 | deployment | harness | 适配器做法 |
 | --- | --- | --- | --- |
 | `decision` | `"no"/"yes"`、整数分数或 `choice` 选项 ID | 同左 | `normalize_decision` 保留相应类型 |
-| `probability` | 完整分布 `dict` | 标量 `P(decision)` | `Prediction.as_harness_tuple()` 取 `prob[str(decision)]` |
+| `probability` | 完整分布 `dict` | 完整分布 `dict`（块 2 新契约） | `Prediction.as_harness_tuple()` 原样透传 `prob`；标量会被新的 `metrics.py` 拒绝 |
 | `logits` | `dict` | `dict` | 原样透传 |
 | `latency_ms`（旧字段 `latency`） | 毫秒 | 秒 | 优先读 `latency_ms`，兼容旧服务的 `latency`；tuple 中除以 1000，JSONL 保留毫秒 |
 
@@ -87,9 +87,21 @@ Prediction(decision, prob: dict[str, float], logits: dict[str, float], latency_m
 
 * `noul`：Platt scaling，`P_cal(yes) = sigmoid(a·logit(P_raw(yes)) + b)`；
 * `score`：温度缩放，`softmax(logits / T)`（用服务端返回的原始 logits，不是概率）；
-* **K 折交叉拟合**（默认 5 折，按标签分层，固定 seed）：每条样本的概率都来自没见过它的校准器；
+* 两种拟合协议，报告里用 `protocol` 字段标明：
+  * **held_out 拟合（PLAN §2.3）**：`--fit-dir <held_out 预测目录>`，用 held_out 拟合、在 eval 上报告；
+  * **K 折交叉拟合**（默认 5 折，按标签分层，固定 seed）：每条样本的概率都来自没见过它的校准器；
 * 报告 raw 与 recalibrated 的 ECE（15 bin，与 `evaluation/metrics.py` 同分箱）、Brier、NLL、accuracy；
-* 产物：`calibration_report.json`（含 pooled 与每折参数，可直接写回服务端）、`calibration_report.md`、`reliability.png`。
+* 区分度指标：`noul` 给 AUROC / macro-F1 / balanced accuracy，`score` 给 macro-F1 / QWK / MAE，
+  且都同时给 raw 与校准后——校准不应改变排序质量，这一栏是"有没有变强"的对照；
+* 所有主指标带 **95% percentile bootstrap CI**（`--bootstrap N`，默认 1000；0 关闭）。
+  注意：CI 重采样的是固定的 out-of-fold 概率，衡量的是 eval 集抽样波动，不含重新拟合校准器的不确定性；
+* 产物：`calibration_report.json`（含 pooled 与每折参数、`protocol`、`ci95`）、`calibration_report.md`、`reliability.png`。
+
+```bash
+# PLAN §2.3 协议：held_out 拟合、eval 报告（需要先对 held_out 跑一次预测）
+python -m block3 predict --model jev --input evaluation/data/held_out.jsonl --out block3/outputs/fit/jev.jsonl
+python -m block3 calibrate --pred-dir block3/outputs/eval --fit-dir block3/outputs/fit --out-dir block3/outputs/calibration
+```
 
 注意：ECE 只衡量"置信度是否等于正确率"，校准不会提升 Brier 的区分度部分；
 在 mock 演示里 ECE 从 0.45 降到 0.003，但 Brier 仍高，这是因为 mock 的预测与标签无关，属于预期现象。
@@ -134,7 +146,9 @@ HTTP 命令在标准输出中给出汇总。集群版本写到 `run_summary.json
 
 ## 真实运行结果（SuperPOD，2026-11-12）
 
-下列历史结果使用旧版协议，仅 Qwen 收到 few-shot 示例。按当前共享示例协议生成正式对比时需要重跑。
+下列历史结果使用旧版协议，仅 Qwen 收到 few-shot 示例；而且评测集已在 2026-11-12 之后重新生成
+（`noul` 改为 SMS + Enron + 钓鱼三来源，`score` 改为 Jigsaw 五子类计数，切分前去重）。
+因此这里的所有数字仅作为"管线跑通"的证据，**正式对比必须在新数据上按共享示例协议重跑**。
 
 一卡 H800 80GB、4-bit NF4、进程内批量推理（`cluster_run.py`），2000 条评测 × 2 个模型，
 **0 失败**，作业 `777059` 墙钟 10m20s（JEV 4.6 min，Qwen 5.4 min）。冒烟作业为 `777055`

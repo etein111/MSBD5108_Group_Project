@@ -1,8 +1,15 @@
 """Block 3 — post-hoc calibration pipeline (T9).
 
-Fits a calibrator on ``held_out`` and reports **raw vs recalibrated** ECE and
-Brier score for both models, using K-fold cross-fitting so every reported
-probability is produced by a calibrator that never saw that sample.
+Two protocols are supported, and the report records which one produced it:
+
+* **held_out fit** (PLAN §2.3): fit on ``held_out`` predictions, report on
+  ``eval`` predictions — pass ``--fit-dir`` to the calibrate command.
+* **K-fold cross-fitting** (default, no extra predictions needed): every
+  reported probability is produced by a calibrator fitted without that sample.
+
+Both report **raw vs recalibrated** ECE / Brier / NLL plus discrimination
+metrics (AUROC, macro-F1, balanced accuracy for ``noul``; macro-F1, QWK, MAE
+for ``score``) and 95% percentile bootstrap intervals.
 
 Methods
 -------
@@ -247,6 +254,168 @@ def calibration_scores(probs: np.ndarray, labels: np.ndarray, kind: str) -> Dict
 
 
 # --------------------------------------------------------------------------- #
+# discrimination metrics (threshold-free where possible)
+# --------------------------------------------------------------------------- #
+def _confusion(predictions: np.ndarray, labels: np.ndarray, n_classes: int) -> np.ndarray:
+    matrix = np.zeros((n_classes, n_classes), dtype=float)
+    np.add.at(matrix, (np.asarray(labels, dtype=int), np.asarray(predictions, dtype=int)), 1.0)
+    return matrix
+
+
+def macro_f1(predictions: np.ndarray, labels: np.ndarray, n_classes: int) -> float:
+    """Unweighted mean of per-class F1, over classes present in the labels."""
+    matrix = _confusion(predictions, labels, n_classes)
+    tp = np.diag(matrix)
+    fp = matrix.sum(axis=0) - tp
+    fn = matrix.sum(axis=1) - tp
+    denominator = 2.0 * tp + fp + fn
+    per_class = np.divide(2.0 * tp, denominator, out=np.zeros_like(tp), where=denominator > 0)
+    present = (tp + fn) > 0
+    return float(per_class[present].mean()) if present.any() else float("nan")
+
+
+def balanced_accuracy(predictions: np.ndarray, labels: np.ndarray, n_classes: int) -> float:
+    matrix = _confusion(predictions, labels, n_classes)
+    tp = np.diag(matrix)
+    fn = matrix.sum(axis=1) - tp
+    present = (tp + fn) > 0
+    recalls = np.divide(tp, tp + fn, out=np.zeros_like(tp), where=present)
+    return float(recalls[present].mean()) if present.any() else float("nan")
+
+
+def quadratic_weighted_kappa(predictions: np.ndarray, labels: np.ndarray, n_classes: int) -> float:
+    observed = _confusion(predictions, labels, n_classes)
+    total = observed.sum()
+    if total == 0:
+        return float("nan")
+    row = observed.sum(axis=1)
+    column = observed.sum(axis=0)
+    expected = np.outer(row, column) / total
+    positions = np.arange(n_classes)
+    weights = (positions[:, None] - positions[None, :]) ** 2 / max((n_classes - 1) ** 2, 1)
+    denominator = float((weights * expected).sum())
+    return 1.0 - float((weights * observed).sum()) / denominator if denominator > 0 else float("nan")
+
+
+def binary_auroc(scores: np.ndarray, labels: np.ndarray) -> float:
+    """Rank-based AUC with average ranks for ties (same value as sklearn)."""
+    scores = np.asarray(scores, dtype=float)
+    labels = np.asarray(labels, dtype=int)
+    positive = scores[labels == 1]
+    negative = scores[labels == 0]
+    if positive.size == 0 or negative.size == 0:
+        return float("nan")
+    combined = np.concatenate([positive, negative])
+    order = np.argsort(combined, kind="mergesort")
+    sorted_values = combined[order]
+    ranks = np.empty(combined.size, dtype=float)
+    start = 0
+    while start < sorted_values.size:
+        stop = start
+        while stop + 1 < sorted_values.size and sorted_values[stop + 1] == sorted_values[start]:
+            stop += 1
+        ranks[order[start:stop + 1]] = 0.5 * (start + stop) + 1.0
+        start = stop + 1
+    rank_sum = ranks[:positive.size].sum()
+    return float(
+        (rank_sum - positive.size * (positive.size + 1) / 2.0) / (positive.size * negative.size)
+    )
+
+
+def discrimination_scores(probs: np.ndarray, labels: np.ndarray, kind: str) -> Dict[str, float]:
+    """Threshold-free / threshold-aware quality, independent of calibration."""
+    probs = np.asarray(probs, dtype=float)
+    labels = np.asarray(labels, dtype=int)
+    predictions = probs.argmax(axis=1)
+    if kind == "noul":
+        return {
+            "auroc": binary_auroc(probs[:, 1], labels),
+            "macro_f1": macro_f1(predictions, labels, 2),
+            "balanced_accuracy": balanced_accuracy(predictions, labels, 2),
+        }
+    n_classes = probs.shape[1]
+    return {
+        "macro_f1": macro_f1(predictions, labels, n_classes),
+        "qwk": quadratic_weighted_kappa(predictions, labels, n_classes),
+        "mae": float(np.mean(np.abs(predictions - labels))),
+    }
+
+
+CI_KEYS = ("ece_15bin", "brier", "auroc", "macro_f1")
+
+
+def bootstrap_ci(
+    probs: np.ndarray,
+    labels: np.ndarray,
+    kind: str,
+    n_boot: int = 1000,
+    seed: int = 0,
+    alpha: float = 0.05,
+) -> Dict[str, List[float]]:
+    """Percentile bootstrap CI for the reported metrics.
+
+    Resamples the *fixed* out-of-fold probabilities, so the interval measures
+    sampling variability of the metric on this eval set; it does not include
+    uncertainty from re-fitting the calibrator.
+    """
+    probs = np.asarray(probs, dtype=float)
+    labels = np.asarray(labels, dtype=int)
+    if n_boot <= 0 or len(labels) < 2:
+        return {}
+    rng = np.random.default_rng(seed)
+    collected: Dict[str, List[float]] = {key: [] for key in CI_KEYS}
+    for _ in range(n_boot):
+        indices = rng.integers(0, len(labels), size=len(labels))
+        sample_labels = labels[indices]
+        if np.unique(sample_labels).size < 2:
+            continue  # AUC/macro-F1 undefined on a single-class resample
+        sample = {
+            **calibration_scores(probs[indices], sample_labels, kind),
+            **discrimination_scores(probs[indices], sample_labels, kind),
+        }
+        for key in CI_KEYS:
+            value = sample.get(key)
+            if value is not None and np.isfinite(value):
+                collected[key].append(float(value))
+    return {
+        key: [float(np.percentile(values, 100 * alpha / 2)),
+              float(np.percentile(values, 100 * (1 - alpha / 2)))]
+        for key, values in collected.items()
+        if len(values) > 1
+    }
+
+
+# --------------------------------------------------------------------------- #
+# calibration fitting protocols
+# --------------------------------------------------------------------------- #
+def fit_on(
+    fit_records: Sequence[Mapping[str, Any]],
+    records: Sequence[Mapping[str, Any]],
+    kind: str,
+    method: Optional[str] = None,
+) -> Tuple[np.ndarray, Dict[str, float]]:
+    """PLAN §2.3 protocol: fit on ``held_out``, report on ``eval``."""
+    method = method or DEFAULT_METHOD[kind]
+    fit_labels = label_indices(fit_records, kind)
+    fit_probs = probability_matrix(fit_records, kind)
+    probs = probability_matrix(records, kind)
+    calibrated = np.empty_like(probs)
+    if method == "platt":
+        scaler = PlattScaler().fit(fit_probs[:, 1], fit_labels)
+        p_yes = scaler.transform(probs[:, 1])
+        calibrated[:, 1] = p_yes
+        calibrated[:, 0] = 1.0 - p_yes
+        params: Dict[str, float] = {"a": scaler.a, "b": scaler.b}
+    elif method == "temperature":
+        scaler = TemperatureScaler().fit(logit_matrix(fit_records, kind), fit_labels)
+        calibrated = scaler.transform(logit_matrix(records, kind))
+        params = {"temperature": scaler.temperature, "at_boundary": scaler.at_boundary}
+    else:
+        raise ValueError(f"unknown calibration method: {method!r}")
+    return calibrated, params
+
+
+# --------------------------------------------------------------------------- #
 # cross-fitted calibration
 # --------------------------------------------------------------------------- #
 def _stratified_folds(labels: np.ndarray, n_folds: int, seed: int) -> List[np.ndarray]:
@@ -269,12 +438,15 @@ class CalibrationReport:
     raw: Dict[str, float]
     calibrated: Dict[str, float]
     fold_params: List[Dict[str, float]] = field(default_factory=list)
+    protocol: str = "cross_fitted"
+    ci95: Dict[str, Dict[str, List[float]]] = field(default_factory=dict)
 
     def to_dict(self) -> Dict[str, Any]:
         return {
             "model": self.model,
             "kind": self.kind,
             "method": self.method,
+            "protocol": self.protocol,
             "n_folds": self.n_folds,
             "n": self.raw["n"],
             "params": self.params,
@@ -284,6 +456,7 @@ class CalibrationReport:
                 key: self.calibrated[key] - self.raw[key]
                 for key in ("ece_15bin", "brier", "nll")
             },
+            "ci95": self.ci95,
             "fold_params": self.fold_params,
         }
 
@@ -343,21 +516,46 @@ def evaluate(
     method: Optional[str] = None,
     n_folds: int = 5,
     seed: int = 0,
+    fit_records: Optional[Sequence[Mapping[str, Any]]] = None,
+    n_boot: int = 1000,
 ) -> CalibrationReport:
+    """Build one model x kind report.
+
+    With ``fit_records`` the calibrator is fitted on that split only and applied
+    to ``records`` (PLAN §2.3: fit on held_out, report on eval); without it the
+    probabilities are K-fold cross-fitted on ``records`` itself.
+    """
     method = method or DEFAULT_METHOD[kind]
     labels = label_indices(records, kind)
-    raw = calibration_scores(probability_matrix(records, kind), labels, kind)
-    calibrated_probs, params, fold_params = cross_fitted(records, kind, method, n_folds, seed)
-    calibrated = calibration_scores(calibrated_probs, labels, kind)
+    raw_probs = probability_matrix(records, kind)
+    raw = {**calibration_scores(raw_probs, labels, kind),
+           **discrimination_scores(raw_probs, labels, kind)}
+    if fit_records is not None:
+        calibrated_probs, params = fit_on(fit_records, records, kind, method)
+        fold_params: List[Dict[str, float]] = []
+        protocol = "held_out_fit"
+        folds = 0
+    else:
+        calibrated_probs, params, fold_params = cross_fitted(records, kind, method, n_folds, seed)
+        protocol = "cross_fitted"
+        folds = min(max(2, n_folds), len(records))
+    calibrated = {**calibration_scores(calibrated_probs, labels, kind),
+                  **discrimination_scores(calibrated_probs, labels, kind)}
+    ci95 = {
+        "raw": bootstrap_ci(raw_probs, labels, kind, n_boot=n_boot, seed=seed),
+        "calibrated": bootstrap_ci(calibrated_probs, labels, kind, n_boot=n_boot, seed=seed),
+    }
     return CalibrationReport(
         model=model,
         kind=kind,
         method=method,
-        n_folds=min(max(2, n_folds), len(records)),
+        n_folds=folds,
         params=params,
         raw=raw,
         calibrated=calibrated,
         fold_params=fold_params,
+        protocol=protocol,
+        ci95=ci95,
     )
 
 
@@ -367,18 +565,34 @@ def run_calibration(
     n_folds: int = 5,
     seed: int = 0,
     make_plot: bool = True,
+    fit_records_by_model: Optional[Mapping[str, Sequence[Mapping[str, Any]]]] = None,
+    n_boot: int = 1000,
 ) -> List[CalibrationReport]:
     reports: List[CalibrationReport] = []
     for model, records in records_by_model.items():
+        fit_records = list((fit_records_by_model or {}).get(model, []))
         for kind in ("noul", "score"):
             subset = [record for record in records if record.get("type") == kind]
             if len(subset) < 2:
                 continue
-            reports.append(evaluate(subset, kind, model, n_folds=n_folds, seed=seed))
+            fit_subset = [record for record in fit_records if record.get("type") == kind]
+            reports.append(
+                evaluate(
+                    subset,
+                    kind,
+                    model,
+                    n_folds=n_folds,
+                    seed=seed,
+                    fit_records=fit_subset if len(fit_subset) >= 2 else None,
+                    n_boot=n_boot,
+                )
+            )
     out_dir.mkdir(parents=True, exist_ok=True)
     payload = {
         "seed": seed,
         "n_folds": n_folds,
+        "bootstrap": n_boot,
+        "protocol": "held_out_fit" if fit_records_by_model else "cross_fitted",
         "reports": [report.to_dict() for report in reports],
     }
     (out_dir / "calibration_report.json").write_text(
@@ -392,28 +606,74 @@ def run_calibration(
     return reports
 
 
+def _with_ci(value: float, interval: Optional[Sequence[float]]) -> str:
+    if not interval:
+        return f"{value:.4f}"
+    return f"{value:.4f} [{interval[0]:.4f}, {interval[1]:.4f}]"
+
+
 def _markdown(payload: Mapping[str, Any]) -> str:
+    protocol = payload.get("protocol", "cross_fitted")
+    if protocol == "held_out_fit":
+        protocol_note = "Fit on `held_out`, reported on `eval` (PLAN §2.3)."
+    else:
+        protocol_note = (
+            f"Cross-fitting: {payload['n_folds']}-fold, seed {payload['seed']}. "
+            "Every reported probability comes from a calibrator fitted without that sample."
+        )
+    bootstrap = payload.get("bootstrap", 0)
+    ci_note = (
+        f" Brackets are percentile 95% bootstrap intervals ({bootstrap} resamples, seed {payload['seed']})."
+        if bootstrap else ""
+    )
     lines = [
         "# Calibration report (T9)",
         "",
-        f"Cross-fitting: {payload['n_folds']}-fold, seed {payload['seed']}. "
-        "Every reported probability comes from a calibrator fitted without that sample.",
+        protocol_note + ci_note,
         "",
         "| model | kind | method | n | ECE raw | ECE calibrated | Brier raw | Brier calibrated |",
         "| --- | --- | --- | --- | --- | --- | --- | --- |",
     ]
     for report in payload["reports"]:
+        raw_ci = report.get("ci95", {}).get("raw", {})
+        cal_ci = report.get("ci95", {}).get("calibrated", {})
         lines.append(
-            "| {model} | {kind} | {method} | {n} | {ece_raw:.4f} | {ece_cal:.4f} | "
-            "{brier_raw:.4f} | {brier_cal:.4f} |".format(
+            "| {model} | {kind} | {method} | {n} | {ece_raw} | {ece_cal} | "
+            "{brier_raw} | {brier_cal} |".format(
                 model=report["model"],
                 kind=report["kind"],
                 method=report["method"],
                 n=report["n"],
-                ece_raw=report["raw"]["ece_15bin"],
-                ece_cal=report["calibrated"]["ece_15bin"],
-                brier_raw=report["raw"]["brier"],
-                brier_cal=report["calibrated"]["brier"],
+                ece_raw=_with_ci(report["raw"]["ece_15bin"], raw_ci.get("ece_15bin")),
+                ece_cal=_with_ci(report["calibrated"]["ece_15bin"], cal_ci.get("ece_15bin")),
+                brier_raw=_with_ci(report["raw"]["brier"], raw_ci.get("brier")),
+                brier_cal=_with_ci(report["calibrated"]["brier"], cal_ci.get("brier")),
+            )
+        )
+    lines += [
+        "",
+        "Discrimination (does not improve under calibration by construction):",
+        "",
+        "| model | kind | AUC raw | AUC calibrated | macro-F1 raw | macro-F1 calibrated | QWK raw | QWK calibrated | MAE raw | MAE calibrated |",
+        "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |",
+    ]
+    for report in payload["reports"]:
+        def cell(key: str, state: str) -> str:
+            value = report[state].get(key)
+            return f"{value:.4f}" if value is not None and np.isfinite(value) else "—"
+        lines.append(
+            "| {model} | {kind} | {auroc_raw} | {auroc_cal} | {f1_raw} | {f1_cal} | "
+            "{qwk_raw} | {qwk_cal} | {mae_raw} | {mae_cal} |".format(
+                model=report["model"],
+                kind=report["kind"],
+                auroc_raw=cell("auroc", "raw"),
+                auroc_cal=cell("auroc", "calibrated"),
+                f1_raw=cell("macro_f1", "raw"),
+                f1_cal=cell("macro_f1", "calibrated"),
+                qwk_raw=cell("qwk", "raw"),
+                qwk_cal=cell("qwk", "calibrated"),
+                mae_raw=cell("mae", "raw"),
+                mae_cal=cell("mae", "calibrated"),
             )
         )
     railed = [
