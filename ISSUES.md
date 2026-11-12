@@ -10,14 +10,13 @@
 | --- | --- | --- | --- | --- |
 | 1 | **P0** | 块 2 | `score` 标签是随机数，不是毒性 | 所有 `score` 结论作废 |
 | 2 | **P0** | 块 2 | 数据集只覆盖 1/3 任务（只有 SMS spam） | 无法支撑"三类任务"的结论 |
-| 3 | **P0** | 块 1 | 基线是否是真正的 Qwen3.5-9B 未确证 | "受控基线"这个核心卖点站不住 |
-| 4 | **P0** | 块 1+2 | train/eval 文本泄漏、`held_out` 没人用 | 公平性与方法学被质疑 |
-| 5 | P1 | 块 2 | harness 契约只回标量概率 | 多分类校准指标算不出来 |
-| 6 | P1 | 块 2 | 缺 AUROC / macro-F1 口径下的阈值问题 | 准确率结论会被误读 |
-| 7 | P1 | 块 2 | 缺 bootstrap CI、显著性与成本指标 | PLAN §2.5、§2.4 未覆盖 |
-| 8 | P1 | 块 1 | `latency` 单位 ms vs harness 的秒 | 延迟差 1000 倍 |
-| 9 | P1 | 块 1+2 | `requirements.txt` 装不出能跑的评测环境 | 别人照 README 复现不了 |
-| 10 | P2 | 多 | 文档/整洁类（平衡性说法、Mock 图、显存、课程号等） | 影响不大但会被问 |
+| 3 | **P0** | 块 1+2 | train/eval 文本泄漏、`held_out` 没人用 | 公平性与方法学被质疑 |
+| 4 | P1 | 块 2 | harness 契约只回标量概率 | 多分类校准指标算不出来 |
+| 5 | P1 | 块 2 | 缺 AUROC / macro-F1 口径下的阈值问题 | 准确率结论会被误读 |
+| 6 | P1 | 块 2 | 缺 bootstrap CI、显著性与成本指标 | PLAN §2.5、§2.4 未覆盖 |
+| 7 | P1 | 块 1 | `latency` 单位 ms vs harness 的秒 | 延迟差 1000 倍 |
+| 8 | P1 | 块 1+2 | `requirements.txt` 装不出能跑的评测环境 | 别人照 README 复现不了 |
+| 9 | P2 | 多 | 文档/整洁类（平衡性说法、Mock 图、显存、课程号等） | 影响不大但会被问 |
 
 ---
 
@@ -60,37 +59,7 @@ text 是 IMDB 影评（截断到 800 字符）。
 是一个语义不匹配（模型被要求判断两件事，标签只标了一件事）。
 **建议**：要么补 Enron + 钓鱼语料，要么把 prompt 改成 `"Is this message spam?"` 并在报告收窄任务定义。
 
-### 3. 基线是不是官方 Qwen3.5-9B，目前无法证明
-
-`deployment/runtime.py:92-94` 把 JEV 包里自带的 base 包成 `PeftModel`；`runtime.py:139-143` 的 Qwen 路径
-是 `with self.model.disable_adapter(): self.base(...)`——即 **JEV 发布包里的那份文本骨干**，
-不是从 `Qwen/Qwen3.5-9B` 单独下载的权重。`deployment/README.md:3` 也是这么写的。
-
-我对比了两个 HF 仓库的元数据（`/api/models/...`）：
-
-| | JEV 包内 base | 官方 `Qwen/Qwen3.5-9B` |
-| --- | --- | --- |
-| `architectures` | `Qwen3_5ForCausalLM` | `Qwen3_5ForConditionalGeneration` |
-| 模态 | 纯文本塔 | 多模态（含 `vision_config`，depth 27） |
-| 分片 | `model-0000X-of-00005`，共 16.68 GiB | `model.safetensors-0000X-of-00004`，共 17.98 GiB |
-| `tokenizer.json` sha256 | `06b950…e523` | `5f9e4d…cb42` |
-
-两个 checkpoint **不可能逐字节相同**（一个是纯文本导出、一个是多模态）。文本塔的 `text_config`
-（hidden 4096 / 32 层 / vocab 248320 / layer_types）与官方一致，所以大概率只是"重新导出"，
-但**这只是推测**。旁证：JEV 包自带的 `reports/b0_qwen35_9b.md` 用它自己的基线跑出
-`noul_auroc=0.8236`、`top1=0.605`，和我们测到的 Qwen（AUC 0.889、argmax acc 0.549）数量级一致，
-说明 Qwen 路径没有接错，但"它就是官方 Qwen"仍未证明。
-
-**影响**：整篇报告的卖点是"同骨干、只差决策方式"。如果基线被 AutoTrust 继续训练过，
-这个卖点直接崩。而且官方模型是多模态的，写 "Qwen3.5-9B" 而不加限定会被审稿人挑。
-
-**建议二选一**（都很快）：
-1. **证明它**：在 SuperPOD 下载官方模型，按 tensor 名逐张量比 sha256（两边 `index.json` 的 key 应该同名，
-   读 shard 里的原始字节即可，不用加载模型）。全等就可以理直气壮写"同权重"。
-2. **写清楚**：报告里把基线定义成"JEV-9B 发布包内的 Qwen3.5-9B 纯文本骨干（LoRA 关闭）"，
-   并注明与官方多模态发布的差异。
-
-### 4. 数据泄漏 + `held_out` 未被使用
+### 3. 数据泄漏 + `held_out` 未被使用
 
 `data_pipeline.py:101-114` 先 `random.shuffle` 再按 60:20:20 切片，**没有按文本去重**。实测：
 
@@ -117,7 +86,7 @@ SMS spam 本身就有大量重复样本，同一条文本会同时落进 train �
 
 ## P1 — 接口与指标
 
-### 5. harness 契约只回标量概率，多分类校准算不出来
+### 4. harness 契约只回标量概率，多分类校准算不出来
 
 `evaluation/harness.py:9-14` 的协议是 `(decision, probability, logits_dict, latency_seconds)`，
 其中 `probability` 是**标量**。`metrics.py:29-39` 只能拿它当 `P(decision)`。
@@ -132,7 +101,7 @@ SMS spam 本身就有大量重复样本，同一条文本会同时落进 train �
 **建议**：契约改成返回完整 `prob` dict（块 3 的 `Prediction.predict_full()` 已经有），
 `metrics.py` 补多分类 ECE / Brier；同时加一条断言：`sum(prob)≈1`、`decision == argmax`。
 
-### 6. 准确率口径：类别不平衡 + 固定 0.5 阈值
+### 5. 准确率口径：类别不平衡 + 固定 0.5 阈值
 
 `eval.jsonl` 的 `noul` 正例只占 **14.1%**（141/998）。`metrics.py:48` 的 exact match 在这种分布下：
 * 全答 `no` 就有 **85.9%**；
@@ -145,7 +114,7 @@ SMS spam 本身就有大量重复样本，同一条文本会同时落进 train �
 **建议**：`metrics.py` 增加 AUROC 与 balanced accuracy；报告主表用 macro-F1 + AUROC，
 exact match 只在注明阈值（0.5，或按 held_out 先验校正后）的前提下给。
 
-### 7. PLAN 要求的统计与成本指标全部缺失
+### 6. PLAN 要求的统计与成本指标全部缺失
 
 * `PLAN.md:56`：95% bootstrap CI + McNemar / 置换检验 —— 仓库里没有实现。
 * `PLAN.md:51`：每 1000 次决策的成本 —— 没有实现。
@@ -155,14 +124,14 @@ exact match 只在注明阈值（0.5，或按 held_out 先验校正后）的前�
 **建议**：T8 补 `metrics.py` 的这一块；成本口径建议直接用「单条平均秒数 → 每 1000 次 GPU-秒」，
 并注明是 `transformers` 逐条推理（batch=1）的实现，不是 vLLM 吞吐。
 
-### 8. `latency` 单位不一致
+### 7. `latency` 单位不一致
 
 `deployment/protocol.py:32` 的 `Prediction.latency` 是**毫秒**（`runtime.py:151` 乘了 1000）；
 `harness.py:12` 的契约是 `latency_seconds`。块 3 的适配器在 `as_harness_tuple()` 里除了 1000，
 但任何绕过适配器直接接的人都会拿到 1000 倍的数字。
 **建议**：字段名改成 `latency_ms`，或 harness 侧对量级做校验。
 
-### 9. `requirements.txt` 装不出能跑的评测环境
+### 8. `requirements.txt` 装不出能跑的评测环境
 
 `requirements.txt` 只有 4 个包（fastapi / httpx / pydantic / uvicorn），`requirements-cuda.txt` 只加
 torch 相关。而 `evaluation/metrics.py` 需要 **numpy / scikit-learn / matplotlib**，
@@ -208,34 +177,5 @@ s={n:[json.loads(l) for l in Path(f"evaluation/data/{n}.jsonl").open() if l.stri
 for a,b in (("train","eval"),("train","held_out"),("held_out","eval")):
     print(a,b,len({r["text"] for r in s[a]} & {r["text"] for r in s[b]}))
 PY
-
-# 基线权重身份（在 SuperPOD 的 jevbench 环境里跑，CPU 即可，不占 GPU）
-# 先把官方 Qwen/Qwen3.5-9B 下到 /scratch/.../5018/hf/official-qwen，
-# JEV 包在 snapshot 目录（内含 model.safetensors.index.json）。
-python - <<'PY'
-import hashlib, json
-from pathlib import Path
-from safetensors import safe_open
-
-def tensor_hashes(root: Path) -> dict:
-    idx = json.loads((root / "model.safetensors.index.json").read_text())["weight_map"]
-    cache, out = {}, {}
-    for name, shard in idx.items():
-        if shard not in cache:
-            cache[shard] = safe_open(root / shard, framework="pt")
-        t = cache[shard].get_tensor(name).float().contiguous()   # bf16 -> fp32 无损
-        out[name] = hashlib.sha256(t.numpy().tobytes()).hexdigest()
-    return out
-
-jev = tensor_hashes(Path("<jev-snapshot>"))
-qwen = tensor_hashes(Path("<official-qwen>"))
-common = sorted(set(jev) & set(qwen))
-same = [n for n in common if jev[n] == qwen[n]]
-print(f"common={len(common)} identical={len(same)} "
-      f"jev_only={len(set(jev)-set(qwen))} qwen_only={len(set(qwen)-set(jev))}")
-print("first differences:", [n for n in common if jev[n] != qwen[n]][:5])
-PY
 ```
-
-全等 → 可以写"同权重"；多数不等 → 基线定义必须改成"JEV 包内文本骨干"。
 
