@@ -341,6 +341,18 @@ def discrimination_scores(probs: np.ndarray, labels: np.ndarray, kind: str) -> D
     }
 
 
+def effective_uniform(kind: str, scores: Mapping[str, float]) -> bool:
+    """True when the recalibrated distribution is indistinguishable from uniform.
+
+    Temperature scaling can rail just *inside* the search bound (e.g. T≈32 on a
+    six-way head) while its Brier score still equals the uniform predictor's
+    ``(K-1)/K``. Low ECE is then an artefact of ignoring the input, not evidence
+    of good calibration, so the report must say so even without ``at_boundary``.
+    """
+    n_classes = len(LABELS[kind])
+    return float(scores["brier"]) >= (n_classes - 1) / n_classes - 1e-2
+
+
 CI_KEYS = ("ece_15bin", "brier", "auroc", "macro_f1")
 
 
@@ -684,8 +696,19 @@ def _markdown(payload: Mapping[str, Any]) -> str:
         for r in payload["reports"]
         if r["params"].get("at_boundary")
     ]
-    if railed:
-        lines += ["", "## Warnings", ""] + railed
+    effectively_uniform = [
+        f"- **{r['model']}/{r['kind']}**: temperature {r['params'].get('temperature', float('nan')):.3g} "
+        f"stays inside the bound, but the calibrated Brier {r['calibrated']['brier']:.4f} is within "
+        f"0.01 of the uniform predictor's {((len(LABELS[r['kind']]) - 1) / len(LABELS[r['kind']])):.4f}. "
+        "The recalibrated distribution is effectively uniform, so the low ECE is an artefact and the "
+        "decision metrics are unchanged by construction."
+        for r in payload["reports"]
+        if r["method"] == "temperature"
+        and not r["params"].get("at_boundary")
+        and effective_uniform(r["kind"], r["calibrated"])
+    ]
+    if railed or effectively_uniform:
+        lines += ["", "## Warnings", ""] + railed + effectively_uniform
     lines += [
         "",
         "Fitted parameters (pooled, for serving):",

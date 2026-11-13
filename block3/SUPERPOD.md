@@ -76,6 +76,10 @@ sbatch block3/slurm_infer.slurm \
 
 查看 `choice-t10/run_summary.json` 中各模型的 `option_probes`。需要增加样本量时，通过生成器的 `--limit` 按源样本抽取，保留完整配对。
 
+2026-11-13 的正式一轮用 `--limit 200`、四类探针全开（作业 `778430`，两模型各 1600 条、
+0 失败、约 4.5 min），结果在 `../outputs/probes-t10/`，数字汇总见 [README](README.md#真实运行结果superpod2026-11-13)。
+`prompt_injection` 的翻转率需从 `jev.jsonl` / `qwen.jsonl` 按 `pair_id` 自行统计，`run_summary.json` 只自动汇总三类选项探针。
+
 ## 断点续跑
 
 `cluster_run` 会跳过输出文件里已有的 `id`,每条立即落盘:

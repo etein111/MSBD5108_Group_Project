@@ -29,6 +29,7 @@ from block3.calibration import (
     binary_auroc,
     bootstrap_ci,
     cross_fitted,
+    effective_uniform,
     evaluate,
     expected_calibration_error,
     fit_on,
@@ -391,6 +392,15 @@ class CalibrationTests(unittest.TestCase):
         self.assertAlmostEqual(float((tilted_predictions == tilted_labels).mean()), 0.9)
         self.assertAlmostEqual(balanced_accuracy(tilted_predictions, tilted_labels, 2), 0.5)
         self.assertAlmostEqual(macro_f1(tilted_predictions, tilted_labels, 2), (18 / 19) / 2)
+
+    def test_effective_uniform_flags_an_ignored_signal(self):
+        # Brier of the uniform predictor is (K-1)/K: 5/6 for score, 1/2 for noul.
+        self.assertTrue(effective_uniform("score", {"brier": 5 / 6}))
+        self.assertTrue(effective_uniform("noul", {"brier": 0.5}))
+        self.assertFalse(effective_uniform("score", {"brier": 0.57}))
+        self.assertFalse(effective_uniform("noul", {"brier": 0.11}))
+        # The real JEV score fit (T≈32, just inside the bound) must be flagged.
+        self.assertTrue(effective_uniform("score", {"brier": 0.8332}))
 
     def test_quadratic_weighted_kappa_is_one_for_perfect_ordinal_predictions(self):
         labels = np.array([0, 1, 2, 3, 4, 5])
