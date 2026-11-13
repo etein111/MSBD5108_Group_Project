@@ -23,6 +23,7 @@ from block3.adapters import (
     prompt_for_record,
 )
 from block3.calibration import (
+    OrdinalScaler,
     PlattScaler,
     TemperatureScaler,
     balanced_accuracy,
@@ -35,6 +36,7 @@ from block3.calibration import (
     fit_on,
     label_indices,
     macro_f1,
+    nll_from_probs,
     probability_matrix,
     quadratic_weighted_kappa,
     run_calibration,
@@ -347,6 +349,30 @@ class CalibrationTests(unittest.TestCase):
         self.assertGreater(scaler.temperature, 1.4)
         self.assertLess(scaler.temperature, 3.0)
         self.assertFalse(scaler.at_boundary)
+
+    def test_ordinal_scaler_recovers_a_location_bias(self):
+        # Labels drawn from a head whose mode sits 1.2 levels too high.
+        rng = np.random.default_rng(0)
+        n = 1500
+        logits = rng.normal(size=(n, 6)) * 1.5
+        shifted = OrdinalScaler(gamma=-1.2).transform(logits)
+        labels = np.minimum((shifted.cumsum(axis=1) < rng.random((n, 1))).sum(axis=1), 5)
+        scaler = OrdinalScaler().fit(logits, labels)
+        self.assertLess(scaler.gamma, -0.6)
+        self.assertFalse(scaler.at_boundary)
+        calibrated = nll_from_probs(scaler.transform(logits), labels)
+        raw = nll_from_probs(TemperatureScaler().transform(logits), labels)
+        self.assertLess(calibrated, raw)
+
+    def test_ordinal_fit_is_reported_for_score_and_reduces_the_bias(self):
+        fit_records = synthetic_records("score", n=120, seed=1)
+        eval_records = synthetic_records("score", n=80, seed=2)
+        calibrated, params = fit_on(fit_records, eval_records, "score", "ordinal")
+        self.assertIn("gamma", params)
+        self.assertIn("temperature", params)
+        np.testing.assert_allclose(calibrated.sum(axis=1), 1.0)
+        report = evaluate(eval_records, "score", "mock", fit_records=fit_records)
+        self.assertEqual(report.method, "ordinal")
 
     def test_temperature_flags_uninformative_logits(self):
         """Confident logits whose labels are independent rail at the upper bound."""

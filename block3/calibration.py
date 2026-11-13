@@ -14,9 +14,12 @@ for ``score``) and 95% percentile bootstrap intervals.
 Methods
 -------
 * ``noul`` (binary): **Platt scaling** on the log-odds of P(yes).
-* ``score`` (ordinal 0-5): **temperature scaling** on the model's raw logits.
+* ``score`` (ordinal 0-5): **ordinal scaling**, ``softmax(logits / T + gamma * i)``.
+  ``gamma`` is a location term along the ordered score axis; ``gamma == 0``
+  reduces to plain temperature scaling, which cannot move the mode and therefore
+  cannot repair a head that is systematically biased high or low.
 
-The fitted parameters are tiny (two scalars / one scalar) and are written to
+The fitted parameters are tiny (two scalars / two scalars) and are written to
 ``calibration_report.json`` so the deployment can apply them at serving time.
 """
 
@@ -34,7 +37,7 @@ LABELS: Dict[str, Tuple[str, ...]] = {
     "noul": ("no", "yes"),
     "score": tuple(str(level) for level in range(6)),
 }
-DEFAULT_METHOD = {"noul": "platt", "score": "temperature"}
+DEFAULT_METHOD = {"noul": "platt", "score": "ordinal"}
 
 
 # --------------------------------------------------------------------------- #
@@ -130,6 +133,82 @@ class TemperatureScaler:
         logits = np.asarray(logits, dtype=float) / self.temperature
         logits = logits - logits.max(axis=1, keepdims=True)
         shifted = np.exp(logits)
+        return shifted / shifted.sum(axis=1, keepdims=True)
+
+
+#: Bound for the location term. Symmetric and much wider than any plausible
+#: correction; hitting it means the ordered index alone explains the labels.
+ORDINAL_GAMMA_BOUNDS = (-10.0, 10.0)
+
+
+def _nll_with_tilt(
+    scaled_logits: np.ndarray, positions: np.ndarray, gamma: float, labels: np.ndarray
+) -> float:
+    z = scaled_logits + gamma * positions
+    z = z - z.max(axis=1, keepdims=True)
+    log_norm = np.log(np.exp(z).sum(axis=1))
+    return float(np.mean(log_norm - z[np.arange(len(labels)), labels]))
+
+
+@dataclass
+class OrdinalScaler:
+    """``softmax(logits / T + gamma * i)`` over the ordered native slots.
+
+    Temperature alone rescales the logits around their mode; it cannot move the
+    mode along the score axis. A head whose argmax is systematically too high
+    (or too low) therefore fits a large ``T`` that merely flattens the
+    distribution. ``gamma`` is the missing location term — the maximum-entropy
+    tilt towards lower (``gamma < 0``) or higher scores — and is the parameter
+    that repairs that bias.
+    """
+
+    temperature: float = 1.0
+    gamma: float = 0.0
+    at_boundary: bool = False
+
+    def fit(self, logits: np.ndarray, labels: np.ndarray) -> "OrdinalScaler":
+        logits = np.asarray(logits, dtype=float)
+        labels = np.asarray(labels, dtype=int)
+        if logits.ndim != 2 or len(labels) == 0:
+            raise ValueError("Expected a 2-D logit matrix and one label per row.")
+        positions = np.arange(logits.shape[1], dtype=float)
+        t_low, t_high = TEMPERATURE_BOUNDS
+        g_low, g_high = ORDINAL_GAMMA_BOUNDS
+
+        # Coarse grid, then two local refinements (multiplicative in T).
+        best: Tuple[float, float, float] = (math.inf, 1.0, 0.0)
+        for temperature in np.exp(np.linspace(math.log(t_low), math.log(t_high), 33)):
+            scaled = logits / temperature
+            for gamma in np.linspace(g_low, g_high, 41):
+                value = _nll_with_tilt(scaled, positions, gamma, labels)
+                if value < best[0]:
+                    best = (value, float(temperature), float(gamma))
+        for _ in range(2):
+            _, temperature, gamma = best
+            low_t, high_t = max(t_low, temperature / 2.0), min(t_high, temperature * 2.0)
+            low_g, high_g = max(g_low, gamma - 1.5), min(g_high, gamma + 1.5)
+            for candidate_t in np.linspace(low_t, high_t, 17):
+                scaled = logits / candidate_t
+                for candidate_g in np.linspace(low_g, high_g, 17):
+                    value = _nll_with_tilt(scaled, positions, candidate_g, labels)
+                    if value < best[0]:
+                        best = (value, float(candidate_t), float(candidate_g))
+
+        self.temperature, self.gamma = best[1], best[2]
+        self.at_boundary = (
+            self.temperature <= t_low * 1.01
+            or self.temperature >= t_high * 0.99
+            or self.gamma <= g_low + 1e-6
+            or self.gamma >= g_high - 1e-6
+        )
+        return self
+
+    def transform(self, logits: np.ndarray) -> np.ndarray:
+        logits = np.asarray(logits, dtype=float)
+        tilt = self.gamma * np.arange(logits.shape[1], dtype=float)
+        z = logits / self.temperature + tilt
+        z = z - z.max(axis=1, keepdims=True)
+        shifted = np.exp(z)
         return shifted / shifted.sum(axis=1, keepdims=True)
 
 
@@ -422,6 +501,14 @@ def fit_on(
         scaler = TemperatureScaler().fit(logit_matrix(fit_records, kind), fit_labels)
         calibrated = scaler.transform(logit_matrix(records, kind))
         params = {"temperature": scaler.temperature, "at_boundary": scaler.at_boundary}
+    elif method == "ordinal":
+        scaler = OrdinalScaler().fit(logit_matrix(fit_records, kind), fit_labels)
+        calibrated = scaler.transform(logit_matrix(records, kind))
+        params = {
+            "temperature": scaler.temperature,
+            "gamma": scaler.gamma,
+            "at_boundary": scaler.at_boundary,
+        }
     else:
         raise ValueError(f"unknown calibration method: {method!r}")
     return calibrated, params
@@ -508,6 +595,18 @@ def cross_fitted(
                     "at_boundary": scaler.at_boundary,
                 }
             )
+        elif method == "ordinal":
+            logits = logit_matrix(records, kind)
+            scaler = OrdinalScaler().fit(logits[train], labels[train])
+            calibrated[held_out] = scaler.transform(logits[held_out])
+            fold_params.append(
+                {
+                    "fold": fold,
+                    "temperature": scaler.temperature,
+                    "gamma": scaler.gamma,
+                    "at_boundary": scaler.at_boundary,
+                }
+            )
         else:
             raise ValueError(f"unknown calibration method: {method!r}")
 
@@ -515,9 +614,16 @@ def cross_fitted(
     if method == "platt":
         pooled = PlattScaler().fit(probs[:, 1], labels)
         params = {"a": pooled.a, "b": pooled.b}
-    else:
+    elif method == "temperature":
         pooled = TemperatureScaler().fit(logit_matrix(records, kind), labels)
         params = {"temperature": pooled.temperature, "at_boundary": pooled.at_boundary}
+    else:
+        pooled = OrdinalScaler().fit(logit_matrix(records, kind), labels)
+        params = {
+            "temperature": pooled.temperature,
+            "gamma": pooled.gamma,
+            "at_boundary": pooled.at_boundary,
+        }
     return calibrated, params, fold_params
 
 
@@ -618,6 +724,20 @@ def run_calibration(
     return reports
 
 
+def _param_note(params: Mapping[str, float]) -> str:
+    """Compact ``T=1.2, γ=-2.0`` summary for the report's warning lines."""
+    parts = []
+    if "temperature" in params:
+        parts.append(f"T={params['temperature']:.3g}")
+    if "gamma" in params:
+        parts.append(f"gamma={params['gamma']:.3g}")
+    if "a" in params:
+        parts.append(f"a={params['a']:.3g}")
+    if "b" in params:
+        parts.append(f"b={params['b']:.3g}")
+    return ", ".join(parts) or "parameters unavailable"
+
+
 def _with_ci(value: float, interval: Optional[Sequence[float]]) -> str:
     if not interval:
         return f"{value:.4f}"
@@ -664,7 +784,8 @@ def _markdown(payload: Mapping[str, Any]) -> str:
         )
     lines += [
         "",
-        "Discrimination (does not improve under calibration by construction):",
+        "Discrimination (ranking is unchanged by calibration; decision metrics move only with "
+        "the location term):",
         "",
         "| model | kind | AUC raw | AUC calibrated | macro-F1 raw | macro-F1 calibrated | QWK raw | QWK calibrated | MAE raw | MAE calibrated |",
         "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |",
@@ -689,21 +810,21 @@ def _markdown(payload: Mapping[str, Any]) -> str:
             )
         )
     railed = [
-        f"- **{r['model']}/{r['kind']}**: temperature {r['params']['temperature']:.3g} sits on the "
-        f"search bound {TEMPERATURE_BOUNDS[0]:g}-{TEMPERATURE_BOUNDS[1]:g}. The NLL is still "
-        "decreasing at the edge, so the best fit is the uniform distribution: these logits carry "
-        "**no usable signal** for these labels, and the low ECE is not evidence of a good model."
+        f"- **{r['model']}/{r['kind']}**: the {r['method']} fit ({_param_note(r['params'])}) sits on "
+        "its search bound. The NLL is still decreasing at the edge, so the best map is degenerate: "
+        "these logits carry **no usable signal** for these labels, and the low ECE is not evidence "
+        "of a good model."
         for r in payload["reports"]
         if r["params"].get("at_boundary")
     ]
     effectively_uniform = [
-        f"- **{r['model']}/{r['kind']}**: temperature {r['params'].get('temperature', float('nan')):.3g} "
-        f"stays inside the bound, but the calibrated Brier {r['calibrated']['brier']:.4f} is within "
+        f"- **{r['model']}/{r['kind']}**: the {r['method']} fit ({_param_note(r['params'])}) stays "
+        f"inside its bounds, but the calibrated Brier {r['calibrated']['brier']:.4f} is within "
         f"0.01 of the uniform predictor's {((len(LABELS[r['kind']]) - 1) / len(LABELS[r['kind']])):.4f}. "
         "The recalibrated distribution is effectively uniform, so the low ECE is an artefact and the "
         "decision metrics are unchanged by construction."
         for r in payload["reports"]
-        if r["method"] == "temperature"
+        if r["method"] in ("temperature", "ordinal")
         and not r["params"].get("at_boundary")
         and effective_uniform(r["kind"], r["calibrated"])
     ]

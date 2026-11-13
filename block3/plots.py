@@ -95,15 +95,15 @@ def reliability_grid(
             axis.spines[spine].set_color("#C9CED6")
         axis.grid(True, linestyle=":", linewidth=0.6, color="#D8DCE2", zorder=0)
         axis.legend(fontsize=8.5, frameon=False, loc="upper left")
-        uniform_after_temperature = (
-            report.method == "temperature"
+        uniform_after_scaling = (
+            report.method in ("temperature", "ordinal")
             and effective_uniform(report.kind, report.calibrated)
         )
-        if report.params.get("at_boundary") or uniform_after_temperature:
-            # A railed or effectively-uniform temperature means the recalibrated
-            # point is an artefact, not evidence of a good model.
+        if report.params.get("at_boundary") or uniform_after_scaling:
+            # A railed or effectively-uniform fit means the recalibrated point is
+            # an artefact, not evidence of a good model.
             note = (
-                "temperature at search bound\n→ uniform predictor\n(no usable signal)"
+                "fit at search bound\n→ degenerate calibration\n(no usable signal)"
                 if report.params.get("at_boundary")
                 else "calibrated distribution ≈ uniform\n(no usable signal)"
             )

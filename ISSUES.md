@@ -181,7 +181,10 @@ torch 相关。而 `evaluation/metrics.py` 需要 **numpy / scikit-learn / matpl
 ## 我这边（块 3）要跟着改的
 
 1. **T9 换校准协议**：按 PLAN §2.3 改成 held_out 拟合、eval 报告（需要先补 held_out 的预测）。
-2. **`score` 全部挂起**：等块 2 换数据后重跑 T9 的 score 分支和 T10 的 score 探针。
+2. **`score` 已完成报告端修正**：JEV 的决策头系统性偏高（平均期望分 2.55 vs 标签 0.64），
+   温度缩放只会压平分布。T9 改为序数缩放 `softmax(logits/T + gamma·i)`，held_out 拟合得
+   `gamma=-2.0`，校准后 ACC 0.20→0.67、QWK 0.21→0.49、MAE 1.95→0.48。若块 1 想在服务端直接修，
+   可把这个 `gamma` 合进 `score` 输出；`score` 的 T10 探针仍暂缓。
 3. **T10 正式对比待运行**：先跑 `noul` 来源任务，`score` 分支等数据。
 4. `block3/outputs/` 已 gitignore；`block3/README.md` 的"真实运行结果"一节里有全部实测数字。
 
