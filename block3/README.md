@@ -62,7 +62,7 @@ Prediction(decision, prob: dict[str, float], logits: dict[str, float], latency_m
 | 字段 | deployment | harness | 适配器做法 |
 | --- | --- | --- | --- |
 | `decision` | `"no"/"yes"`、整数分数或 `choice` 选项 ID | 同左 | `normalize_decision` 保留相应类型 |
-| `probability` | 完整分布 `dict` | 标量 `P(decision)` | `Prediction.as_harness_tuple()` 取 `prob[str(decision)]` |
+| `probability` | 完整分布 `dict` | 完整分布 `dict`（块 2 新契约） | `Prediction.as_harness_tuple()` 原样透传 `prob`；标量会被新的 `metrics.py` 拒绝 |
 | `logits` | `dict` | `dict` | 原样透传 |
 | `latency_ms`（旧字段 `latency`） | 毫秒 | 秒 | 优先读 `latency_ms`，兼容旧服务的 `latency`；tuple 中除以 1000，JSONL 保留毫秒 |
 
@@ -86,10 +86,26 @@ Prediction(decision, prob: dict[str, float], logits: dict[str, float], latency_m
 ## T9 — 校准管线
 
 * `noul`：Platt scaling，`P_cal(yes) = sigmoid(a·logit(P_raw(yes)) + b)`；
-* `score`：温度缩放，`softmax(logits / T)`（用服务端返回的原始 logits，不是概率）；
-* **K 折交叉拟合**（默认 5 折，按标签分层，固定 seed）：每条样本的概率都来自没见过它的校准器；
+* `score`：序数缩放，`softmax(logits / T + gamma·i)`（`i` 为分值 0–5，用服务端返回的原始 logits，不是概率）。
+  `gamma` 是沿分值轴的**位置项**，`gamma=0` 时退化为温度缩放。单靠温度只能改变分布宽度、
+  无法移动众数，所以决策头系统性偏高/偏低时温度缩放只会把分布压平；`gamma` 正是修这个偏置的参数，
+  拟合目标仍是用 held_out（或交叉拟合的训练折）最小化 NLL；
+* 两种拟合协议，报告里用 `protocol` 字段标明：
+  * **held_out 拟合（PLAN §2.3）**：`--fit-dir <held_out 预测目录>`，用 held_out 拟合、在 eval 上报告；
+  * **K 折交叉拟合**（默认 5 折，按标签分层，固定 seed）：每条样本的概率都来自没见过它的校准器；
 * 报告 raw 与 recalibrated 的 ECE（15 bin，与 `evaluation/metrics.py` 同分箱）、Brier、NLL、accuracy；
-* 产物：`calibration_report.json`（含 pooled 与每折参数，可直接写回服务端）、`calibration_report.md`、`reliability.png`。
+* 区分度指标：`noul` 给 AUROC / macro-F1 / balanced accuracy，`score` 给 macro-F1 / QWK / MAE，
+  且都同时给 raw 与校准后——校准不改变排序（AUC、corr），但位置项会移动 argmax，因此
+  `score` 的 macro-F1/QWK/MAE 在校准后可以变化；这一栏用来区分"排序变强"与"阈值/位置修正"；
+* 所有主指标带 **95% percentile bootstrap CI**（`--bootstrap N`，默认 1000；0 关闭）。
+  注意：CI 重采样的是固定的 out-of-fold 概率，衡量的是 eval 集抽样波动，不含重新拟合校准器的不确定性；
+* 产物：`calibration_report.json`（含 pooled 与每折参数、`protocol`、`ci95`）、`calibration_report.md`、`reliability.png`。
+
+```bash
+# PLAN §2.3 协议：held_out 拟合、eval 报告（需要先对 held_out 跑一次预测）
+python -m block3 predict --model jev --input evaluation/data/held_out.jsonl --out block3/outputs/fit/jev.jsonl
+python -m block3 calibrate --pred-dir block3/outputs/eval --fit-dir block3/outputs/fit --out-dir block3/outputs/calibration
+```
 
 注意：ECE 只衡量"置信度是否等于正确率"，校准不会提升 Brier 的区分度部分；
 在 mock 演示里 ECE 从 0.45 降到 0.003，但 Brier 仍高，这是因为 mock 的预测与标签无关，属于预期现象。
@@ -132,53 +148,107 @@ HTTP 命令在标准输出中给出汇总。集群版本写到 `run_summary.json
 
 2026-11-12 在 Windows 的 RTX 5070 Ti Laptop GPU 上按上述命令验收，输入上限设为 512 tokens。两模型各完成 12 条请求，三类探针各有 2 个完整配对。同一个模型在 HTTP 和进程内两条路径上的决策、概率和 logits 逐条一致。这批样本用于验收接口和指标计算，正式实验需扩大样本量。
 
-## 真实运行结果（SuperPOD，2026-11-12）
+## 真实运行结果（SuperPOD，2026-11-13）
 
-下列历史结果使用旧版协议，仅 Qwen 收到 few-shot 示例。按当前共享示例协议生成正式对比时需要重跑。
+数据为块 2 重新生成后的 `evaluation/data/eval.jsonl`：`noul` 973 条（SMS 325 / Enron 303 / 钓鱼 345），
+`score` 1016 条（Jigsaw 五子类计数 0–5）。两个模型收到**同一份** few-shot 示例
+（`--shots-file evaluation/data/train.jsonl --shots-per-type 4`，按类型取样、顺序一致）；旧版只有 Qwen
+收到示例，因此 2026-11-12 之前的数字与这里不可比。
 
-一卡 H800 80GB、4-bit NF4、进程内批量推理（`cluster_run.py`），2000 条评测 × 2 个模型，
-**0 失败**，作业 `777059` 墙钟 10m20s（JEV 4.6 min，Qwen 5.4 min）。冒烟作业为 `777055`
-（每类 20 条，1m17s）。产物在 `block3/outputs/preds/` 与 `block3/outputs/calibration/`（已 gitignore）。
+一卡 H800 80GB、4-bit NF4、进程内批量推理（`cluster_run.py`），每个作业 1989 条 × 2 模型、**0 失败**：
+作业 `777915` 跑评测集（墙钟 11m31s），`777916` 跑 held_out（11m05s，供 T9 正式协议拟合）。
+产物在 `../outputs/preds-shared-shots/`、`../outputs/fit/`、`../outputs/calibration-{cross,heldout}/`。
 
-**延迟（单条，毫秒）**
+**延迟（单条，毫秒，评测集）**
 
 | 模型 | mean | p50 | p95 |
 | --- | --- | --- | --- |
-| JEV-9B | 140.7 | 137.0 | 180.1 |
-| Qwen3.5-9B（few-shot） | 164.5 | 172.0 | 215.8 |
+| JEV-9B | 164.0 | 154.3 | 213.6 |
+| Qwen3.5-9B（同示例） | 158.7 | 157.2 | 179.8 |
 
-**`noul`（二分类，n=998，正例 141）** — 5 折交叉拟合
+**`noul`（二分类，n=973，正例 354，正例率 36.4%）— 5 折交叉拟合**
 
-| 模型 | ACC raw | ACC 校准后 | AUC | ECE raw → 校准 | Brier raw → 校准 |
-| --- | --- | --- | --- | --- | --- |
-| JEV-9B | **0.9549** | 0.9619 | **0.9736** | 0.1407 → **0.0147** | 0.0602 → 0.0347 |
-| Qwen3.5-9B | 0.5491 | 0.9048 | 0.8888 | 0.0722 → 0.0232 | 0.2459 → 0.0750 |
+| 模型 | ACC raw | ACC 校准后 | AUC raw → 校准 | macro-F1 raw → 校准 | ECE raw → 校准 | Brier raw → 校准 |
+| --- | --- | --- | --- | --- | --- | --- |
+| JEV-9B | **0.9476** | 0.9445 | **0.9813** → 0.9808 | **0.9416** → 0.9394 | 0.1408 → **0.0179** | **0.0693** → 0.0416 |
+| Qwen3.5-9B | 0.4090 | 0.8314 | 0.9003 → 0.8994 | 0.3423 → 0.8059 | 0.3188 → 0.0282 | 0.2666 → 0.1141 |
+
+分来源（注意 Qwen 的"答 yes 率"与正例率的偏离方向因来源而异）：
+
+| 来源 | n | 正例率 | JEV ACC | JEV 答 yes | Qwen ACC | Qwen 答 yes |
+| --- | --- | --- | --- | --- | --- | --- |
+| Enron | 303 | 49.5% | 0.8614 | 36.3% | 0.5413 | 95.4% |
+| 钓鱼 | 345 | 47.5% | 0.9971 | 47.8% | 0.5594 | 91.6% |
+| SMS | 325 | 12.3% | 0.9754 | 9.9% | 0.1262 | 99.7% |
 
 三点必须如实写进报告，否则容易被误读：
 
-1. **JEV 更准，但原始概率更"虚"。** AUC 0.974 vs 0.889、raw ACC 95.5% vs 54.9%，JEV 的决策明显更好；
-   但 JEV 的 raw ECE（0.141）反而比 Qwen（0.072）差——它对自己的答案过度自信。
-   一个两参数 Platt（`a=3.34, b=+1.12`）就能把 ECE 压到 0.015，代价可忽略。
-2. **Qwen 的 54.9% 不是"不会做"，是阈值错位。** 它对 57.9% 的样本答 yes（真实正例率 14.1%），
-   但 AUC 0.889 说明排序里仍有信息；Platt 的偏移项 `b=-3.25` 把判定阈值挪到 `p≈0.61`，
-   交叉拟合后 ACC 回到 90.5%。因此"校准后 ACC 0.905"应表述为 **"学出一个阈值后达到的准确率"**，
-   不能当成 Qwen 天然有 90% 准确率。
-3. **校准不改变排序能力。** 两者 Brier 的下降主要来自收缩（shrinkage），不是区分度提升；
-   ECE 降低证明"置信度对得上正确率"，不等于模型变强。
+1. **JEV 的决策在三个来源上都强**（Enron 最弱，0.861；钓鱼 0.997），AUC 0.981，且 yes 率与正例率同量级。
+   它的原始概率偏自信（ECE 0.141），Platt（`a=3.02, b=+0.89`）把 ECE 压到 0.018，代价可忽略。
+2. **Qwen 的 AUC 0.900 说明排序里有信息，但它几乎总答 yes**（95.5% vs 真实 36.4%；SMS 上 99.7% vs 12.3%，
+   比"全答 no"的 87.7% 还差）。Platt 的偏移项 `b=-4.55` 把阈值右移，交叉拟合后 ACC 0.831、macro-F1 0.806。
+   这应表述为 **"学出一个阈值后达到的准确率"**，不能当成 Qwen 天然有 83% 准确率——
+   在不做校准的原生输出上，它的决策接近废掉。
+3. **校准不改变排序能力。** AUC 与 Brier 的区分度成分在校准前后基本不变，Brier 的下降主要来自收缩；
+   macro-F1 上升是 argmax 随阈值移动的结果，不是模型变强。
 
-**`score`（六分类，n=1002）— 当前数据无效，数字不要上台**
+**两种拟合协议的对照**（held_out 拟合 vs 5 折交叉拟合，评测集报告）：
 
-| 模型 | ACC | ACC 若把 gold 反成 5−g | corr(gold, E[score]) | 温度 |
+| 组合 | ECE 交叉 | ECE held_out | Brier 交叉 | Brier held_out |
 | --- | --- | --- | --- | --- |
-| JEV-9B | 0.131 | 0.226 | **−0.410** | 撞上界 |
-| Qwen3.5-9B | 0.128 | 0.175 | −0.201 | 撞上界 |
+| jev / noul | 0.0179 | 0.0178 | 0.0416 | 0.0429 |
+| jev / score | 0.0852 | 0.0864 | 0.4171 | 0.4160 |
+| qwen / noul | 0.0282 | 0.0348 | 0.1141 | 0.1142 |
+| qwen / score | 0.0277 | 0.0232 | 0.5392 | 0.5389 |
 
-- 六分类随机准确率 0.167，两个模型都**低于随机**；JEV 的期望分与标签**负相关**，
-  说明 `score` 的标签映射方向就是错的（把 IMDB 星级当成 toxicity 0–5）。
-- 温度缩放的最优解落在搜索上界（`T=1e4`），即"最优校准 = 输出均匀分布"，
-  Brier 恰好等于 `5/6 = 0.8333`。报告里校准后的 ECE 0.036 是"均匀分布"的性质，
-  **不是模型变准**；`calibration_report.md` 的 Warnings 段和 `reliability.png` 的面板注记都会显式标出这一点。
-- `score` 的正式 T9 和 T10 实验需等块 2 提供真实毒性数据后重跑。
+两种协议给出的数字几乎相同，说明交叉拟合没有明显乐观偏差；正式报告引用 held_out 协议即可。
+
+**`score`（六分类，n=1016，5 折交叉拟合）— 序数缩放修掉分值偏置**
+
+标签分布高度零膨胀：0 类 672 条、1 类 129、2 类 141、3 类 57、4 类 15、5 类 2（均值 0.642，66% 为 0）。
+六分类随机准确率 0.167，多数类基线 0.661。
+
+| 模型 | ACC raw → 校准 | ECE raw → 校准 | Brier raw → 校准 | macro-F1 raw → 校准 | QWK raw → 校准 | MAE raw → 校准 | corr(gold, E[score]) |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| JEV-9B | 0.2018 → **0.6713** | 0.1929 → **0.0852** | 0.9525 → **0.4171** | 0.1346 → **0.2724** | 0.2096 → **0.4941** | 1.9469 → **0.4793** | **+0.611** |
+| Qwen3.5-9B | 0.6329 → 0.6614 | 0.2371 → **0.0277** | 0.6255 → 0.5392 | 0.1488 → 0.1327 | 0.0082 → 0.0000 | 0.6850 → 0.6417 | +0.168 |
+
+- **JEV 的 argmax 系统性偏高，但序数信号是真的。** 期望分与标签正相关 +0.611，平均 2.55 而标签均值 0.64。
+  序数缩放拟合出 `T=0.98, gamma=-2.0`（held_out：`T=0.99, gamma=-2.0`），把分值轴整体下移：
+  ACC 0.202→0.671、QWK 0.210→0.494、MAE 1.947→0.479、Brier 0.953→0.417。
+  信息一直在概率里，错的是决策头的分值位置；**温度缩放单独用会失败**（旧默认拟合出 `T≈32`、
+  Brier 0.8332 ≈ 均匀预测器的 5/6，ECE 0.027 是假象），这正是改用 `softmax(logits/T + gamma·i)` 的原因。
+- **Qwen 的 0.633 是多数类基线以下的"全答 0"**（960/1016 答 0）。序数缩放对它退化成类先验：
+  held_out 拟合得到 `T≈42, gamma=-1.0`，校准后全部答 0（ACC 0.6614 = 多数类基线），QWK 0.000，
+  corr 仅 0.168（交叉拟合的每折拟合更极端，直接撞到 `T` 上界并触发报告警告）。
+  也就是说它的 score 概率里没有可用的序数信号，任何单调校准都救不回来。
+- **校准后的 0.085 ECE 才是 JEV/score 的真实水平。** 它比旧的 0.027 大，因为旧值来自"把分布压平"；
+  序数缩放保留了分布形状、只移动位置，ECE 没有再被均匀化掩盖。
+- 这个修正属于报告端（T9）。若块 1 想从源头去掉偏置，可把 `gamma=-2.0` 合进 `score` 决策头/服务端输出；
+  在没改之前，引用 score 指标必须写明"经序数缩放后的报告值"。
+
+**T10 对抗探针（`noul`，每类 200 个完整配对）**
+
+作业 `778430`，两模型各 1600 条、0 失败（JEV 4.5 min / Qwen 4.4 min）。产物在 `../outputs/probes-t10/`。
+
+| 探针 | 指标 | JEV-9B | Qwen3.5-9B |
+| --- | --- | --- | --- |
+| `option_renaming` | 决策翻转率 | **0.010** | 0.115 |
+| | 概率平均 TV 距离 | **0.0233** | 0.0957 |
+| `option_order_permutation` | 决策翻转率 | **0.050** | 0.235 |
+| | 概率平均 TV 距离 | **0.0348** | 0.2098 |
+| `abstain_removal` | 原始弃权率 | 0.005 | 0.000 |
+| | 移除后强制作答准确率 | **0.890** | 0.460 |
+| `prompt_injection` | 决策翻转率 | **0.010** | 0.045 |
+| | 答 yes 率（原 → 扰动） | 0.290 → 0.300 | 0.945 → 0.970 |
+| | 准确率（原 → 扰动） | 0.940 → 0.930 | 0.395 → 0.360 |
+
+- JEV 对表面形式几乎不敏感：换标签名只翻转 1%，逆序翻转 5%，注入只翻转 1%，概率分布的平均 TV 距离都在 0.035 以内。
+- Qwen 每 9 条就有 1 条因换标签名改变决策，逆序时每 4 条改变 1 条；概率迁移量是 JEV 的 4–6 倍。
+  移除弃权选项后强制作答只剩 0.46（JEV 0.89），说明它的选择依赖选项呈现方式而不是文本内容。
+  注入探针对 Qwen 的信息量有限：它在原始条件下已有 94.5% 答 yes，天花板效应掩盖了是否"被推向 yes"。
+- 换算口径：T10 用的是主评测集 `noul` 中按 `--seed 0` 随机抽的 200 条（同分布），但走 `choice`
+  协议且在 Yes/No 中强制作答，所以 0.890/0.460 不能直接与上表的 0.9476/0.4090 相减。
 
 ## 测试
 
@@ -199,7 +269,11 @@ python -m unittest discover -s block3/tests -v
 
 ## 当前状态与待办
 
-* 正式 T10 对比待运行。先跑 `noul` 来源任务，`score` 等块 2 提供真实毒性标签。
-* T9 主结果仍需按计划用独立 `held_out` 拟合，并在 eval 报告。
+* **T9 已完成**：held_out 拟合协议的报告在 `../outputs/calibration-heldout/`，交叉拟合在
+  `../outputs/calibration-cross/` 作为稳健性对照，两者数字几乎相同。
+* **T10 已完成 `noul` 的 200 配对**（四类探针，作业 `778430`）。`score` 一侧暂不跑：
+  主任务的分值偏置虽已由序数缩放修正，探针仍会混入决策头的位置效应。
+* **`score` 的报告端修正已完成**：序数缩放的 `gamma` 已落在报告参数里（JEV `gamma=-2.0`）。
+  块 1 若采纳，可把它合进服务端输出，届时报告不再需要额外说明。
 * ⚠️ 延迟数字来自 `cluster_run` 的进程内批量推理（含每条约 0.4 ms 落盘开销），
   不等于 HTTP 服务端到端延迟，T8 若引用需注明测量口径。

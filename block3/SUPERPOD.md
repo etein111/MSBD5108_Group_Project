@@ -39,6 +39,28 @@ sbatch block3/slurm_infer.slurm
 
 `--gpus=1`、`--time=01:00:00`;H800 80GB 对 9B(4-bit NF4)绰绰有余,单卡即可。
 
+## T9 正式协议:held_out 拟合
+
+PLAN §2.3 要求「用 held_out 集拟合、eval 集报告」。先给 held_out 跑一次预测(只需一次):
+
+```bash
+sbatch block3/slurm_infer.slurm \
+    --input "$PWD/evaluation/data/held_out.jsonl" \
+    --out-dir "$PWD/../outputs/fit"
+```
+
+再在登录节点出报告(纯 numpy/matplotlib,不占 GPU):
+
+```bash
+python -m block3 calibrate \
+    --pred-dir ../outputs/preds-shared-shots \
+    --fit-dir ../outputs/fit \
+    --out-dir ../outputs/calibration-heldout \
+    --folds 5 --seed 0 --bootstrap 1000
+```
+
+报告 JSON 的 `protocol` 会写成 `held_out_fit`;不带 `--fit-dir` 时是交叉拟合,作为稳健性检查保留。
+
 ## T10 选项探针
 
 在集群仓库根目录生成选项探针，再给 Slurm 脚本传入专用输入和输出目录。两模型使用脚本指定的同一份 train few-shot 示例。
@@ -53,6 +75,10 @@ sbatch block3/slurm_infer.slurm \
 ```
 
 查看 `choice-t10/run_summary.json` 中各模型的 `option_probes`。需要增加样本量时，通过生成器的 `--limit` 按源样本抽取，保留完整配对。
+
+2026-11-13 的正式一轮用 `--limit 200`、四类探针全开（作业 `778430`，两模型各 1600 条、
+0 失败、约 4.5 min），结果在 `../outputs/probes-t10/`，数字汇总见 [README](README.md#真实运行结果superpod2026-11-13)。
+`prompt_injection` 的翻转率需从 `jev.jsonl` / `qwen.jsonl` 按 `pair_id` 自行统计，`run_summary.json` 只自动汇总三类选项探针。
 
 ## 断点续跑
 

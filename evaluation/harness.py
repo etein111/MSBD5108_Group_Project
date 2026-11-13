@@ -75,7 +75,15 @@ class JevBenchHarness:
             opts = item.get("options", [])
 
             try:
-                dec, prob, logits, lat = self.adapter.predict(prompt, text, ttype, opts)
+                # Adapters that can use the whole record (e.g. block3's choice
+                # probes need ``source_type`` for few-shot selection) opt in by
+                # exposing ``predict_record``; the 4-argument contract remains
+                # the fallback for plain ModelAdapter implementations.
+                predict_record = getattr(self.adapter, "predict_record", None)
+                if predict_record is not None:
+                    dec, prob, logits, lat = predict_record(item)
+                else:
+                    dec, prob, logits, lat = self.adapter.predict(prompt, text, ttype, opts)
                 record = {
                     "id": sid,
                     "type": ttype,

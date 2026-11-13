@@ -16,6 +16,7 @@ import numpy as np
 from .calibration import (
     CalibrationReport,
     cross_fitted,
+    effective_uniform,
     label_indices,
     probability_matrix,
     reliability_bins,
@@ -94,12 +95,20 @@ def reliability_grid(
             axis.spines[spine].set_color("#C9CED6")
         axis.grid(True, linestyle=":", linewidth=0.6, color="#D8DCE2", zorder=0)
         axis.legend(fontsize=8.5, frameon=False, loc="upper left")
-        if report.params.get("at_boundary"):
-            # A railed temperature means the fitted distribution is uniform: the
-            # single recalibrated point is an artefact, not a good model.
+        uniform_after_scaling = (
+            report.method in ("temperature", "ordinal")
+            and effective_uniform(report.kind, report.calibrated)
+        )
+        if report.params.get("at_boundary") or uniform_after_scaling:
+            # A railed or effectively-uniform fit means the recalibrated point is
+            # an artefact, not evidence of a good model.
+            note = (
+                "fit at search bound\n→ degenerate calibration\n(no usable signal)"
+                if report.params.get("at_boundary")
+                else "calibrated distribution ≈ uniform\n(no usable signal)"
+            )
             axis.text(
-                0.03, 0.75,
-                "temperature at search bound\n→ uniform predictor\n(no usable signal)",
+                0.03, 0.75, note,
                 transform=axis.transAxes, ha="left", va="top",
                 fontsize=7.5, color=MUTED, style="italic",
             )

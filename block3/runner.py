@@ -123,12 +123,10 @@ def _predict(args: argparse.Namespace) -> None:
     print(json.dumps({"out": str(args.out), **summarize(results)}, indent=2))
 
 
-def _calibrate(args: argparse.Namespace) -> None:
-    from .calibration import run_calibration
-
-    files = sorted(Path(args.pred_dir).glob("*.jsonl"))
+def _predictions_by_model(directory: Path) -> Dict[str, List[Dict[str, Any]]]:
+    files = sorted(Path(directory).glob("*.jsonl"))
     if not files:
-        raise SystemExit(f"no prediction files in {args.pred_dir}")
+        raise SystemExit(f"no prediction files in {directory}")
     records_by_model: Dict[str, List[Dict[str, Any]]] = {}
     for path in files:
         records = [r for r in load_records(path) if r.get("status") == "success"]
@@ -136,18 +134,40 @@ def _calibrate(args: argparse.Namespace) -> None:
             continue
         model = records[0].get("model") or path.stem
         records_by_model.setdefault(model, []).extend(records)
+    return records_by_model
+
+
+def _calibrate(args: argparse.Namespace) -> None:
+    from .calibration import run_calibration
+
+    records_by_model = _predictions_by_model(Path(args.pred_dir))
+    fit_records_by_model = (
+        _predictions_by_model(Path(args.fit_dir)) if args.fit_dir else None
+    )
     reports = run_calibration(
-        records_by_model, Path(args.out_dir), n_folds=args.folds, seed=args.seed, make_plot=not args.no_plot
+        records_by_model,
+        Path(args.out_dir),
+        n_folds=args.folds,
+        seed=args.seed,
+        make_plot=not args.no_plot,
+        fit_records_by_model=fit_records_by_model,
+        n_boot=args.bootstrap,
     )
     summary = [
         {
             "model": report.model,
             "kind": report.kind,
             "method": report.method,
+            "protocol": report.protocol,
             "ece_raw": round(report.raw["ece_15bin"], 4),
             "ece_calibrated": round(report.calibrated["ece_15bin"], 4),
             "brier_raw": round(report.raw["brier"], 4),
             "brier_calibrated": round(report.calibrated["brier"], 4),
+            **{
+                key: round(float(value), 4)
+                for key, value in report.raw.items()
+                if key in ("auroc", "macro_f1", "qwk", "mae") and value == value
+            },
         }
         for report in reports
     ]
@@ -175,6 +195,11 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
     calibrate.add_argument("--folds", type=int, default=5)
     calibrate.add_argument("--seed", type=int, default=0)
     calibrate.add_argument("--no-plot", action="store_true")
+    calibrate.add_argument("--fit-dir", type=Path, default=None,
+                           help="prediction directory used to fit the calibrator (e.g. held_out); "
+                                "default is K-fold cross-fitting inside --pred-dir")
+    calibrate.add_argument("--bootstrap", type=int, default=1000,
+                           help="bootstrap resamples for the 95%% CI (0 disables)")
     calibrate.set_defaults(handler=_calibrate)
 
     args = parser.parse_args(argv)
