@@ -75,22 +75,22 @@ def draw(task, kind, method, name, ax, preds, fits):
         c = curve(probs)
         xs = [x for x, s in zip(c["confidence"], c["size"]) if s]
         ys = [y for y, s in zip(c["accuracy"], c["size"]) if s]
-        ax.plot(xs, ys, color=color, lw=2.2, marker="o", ms=5,
-                markeredgecolor="white", markeredgewidth=0.6,
+        ax.plot(xs, ys, color=color, lw=2.6, marker="o", ms=6,
+                markeredgecolor="white", markeredgewidth=0.7,
                 label=f"{label} (ECE {ece:.3f})", zorder=3)
-    ax.plot([0, 1], [0, 1], "--", color=GRAY, lw=1.2, label="Perfect", zorder=1)
+    ax.plot([0, 1], [0, 1], "--", color=GRAY, lw=1.4, label="Perfect", zorder=1)
     ax.set_xlim(-0.02, 1.02)
     ax.set_ylim(-0.02, 1.02)
     ax.set_aspect("equal")
-    ax.set_xlabel("Mean predicted confidence", fontsize=11, color=MUTED)
-    ax.set_ylabel("Empirical accuracy", fontsize=11, color=MUTED)
-    ax.set_title(f"{name} (n={len(subset)})", fontsize=13, color=INK,
+    ax.set_xlabel("Mean predicted confidence", fontsize=14, color=MUTED)
+    ax.set_ylabel("Empirical accuracy", fontsize=14, color=MUTED)
+    ax.set_title(f"{name} (n={len(subset)})", fontsize=16, color=INK,
                  fontweight="bold", loc="left")
-    ax.tick_params(colors=MUTED, labelsize=10)
+    ax.tick_params(colors=MUTED, labelsize=13)
     for spine in ("top", "right"):
         ax.spines[spine].set_visible(False)
     ax.grid(True, linestyle=":", linewidth=0.6, color="#D8DCE2", zorder=0)
-    ax.legend(fontsize=9, frameon=False, loc="upper left")
+    ax.legend(fontsize=12, frameon=False, loc="upper left")
 
 
 def main() -> None:
@@ -105,13 +105,13 @@ def main() -> None:
             for m in ("jev", "qwen")}
 
     for group, tasks in GROUPS.items():
-        fig, axes = plt.subplots(2, 2, figsize=(12, 10.4), dpi=170, squeeze=False)
+        fig, axes = plt.subplots(2, 2, figsize=(13, 11.2), dpi=170, squeeze=False)
         for row, model in enumerate(("jev", "qwen")):
             for col, (task, kind, method, name) in enumerate(tasks):
                 ax = axes[row][col]
                 draw(task, kind, method, f"{model.upper()} · {name}", ax, preds[model], fits[model])
         fig.suptitle(f"Reliability — raw vs held-out recalibration ({group} tasks)",
-                     x=0.02, ha="left", fontsize=14, color=INK)
+                     x=0.02, ha="left", fontsize=17, color=INK)
         fig.tight_layout(rect=(0, 0, 1, 0.96))
         path = OUT / f"reliability_{group}.png"
         fig.savefig(path, facecolor="white", bbox_inches="tight")
