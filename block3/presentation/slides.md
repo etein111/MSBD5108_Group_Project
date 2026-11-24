@@ -24,7 +24,7 @@ SuperPOD (1×H800, NF4). Blue = JEV-9B, orange = Qwen3.5-9B.
 
 *Left: temperature widens but keeps the mode. Right: the location term γ shifts the mode down (illustrative, not measured data).*
 
-> **Speaker note:** The signal was in the probabilities all along; the decision head's *score location* was wrong. This is a report-side correction (T9).
+> **Speaker script:** Block 3 is about calibration — turning a model's raw probabilities into numbers we can trust. The headline is on the count task. JEV's decision head is biased high: it predicts a mean score of 2.55 when the true mean is 0.64. But the ranking is real — the expected score correlates 0.61 with the gold label. Temperature scaling can only widen the distribution; it cannot move the mode, so it flattened everything to near-uniform. That is why we added a location term, gamma times the class index. Fitting it on held-out data gives gamma equal to minus 2, which shifts the mode down. Accuracy goes from 0.20 to 0.67, QWK from 0.21 to 0.44, and Brier from 0.95 to 0.42. The signal was in the logits all along; only the head's location was wrong.
 
 ---
 
@@ -52,7 +52,7 @@ SuperPOD (1×H800, NF4). Blue = JEV-9B, orange = Qwen3.5-9B.
 
 *Reliability diagrams (raw vs held-out recalibration) for both models across all four tasks. The phishing panel uses the length-matched rebuild.*
 
-> **Speaker note:** Reporting calibrated accuracy for Qwen's binary tasks means "accuracy after learning a threshold", not native accuracy — its raw output answers "yes" almost always.
+> **Speaker script:** This slide is the main comparison across the four tasks, and two patterns stand out. First, JEV has the best ranking everywhere — AUC 0.97 on SMS, 0.91 on phishing, 0.93 on binary toxicity. Second, Qwen's binary tasks have decent ranking but a broken raw threshold: it answers "yes" almost all the time. On SMS it is only 0.31 raw, but after Platt scaling, which learns a threshold, it is 0.83. That is accuracy after learning a threshold, not native accuracy — that distinction matters. On the count task Qwen collapses to the class prior, with QWK zero. The phishing panel is new: we rebuilt it because the original corpus was separable by length alone. After length-matching, both models drop from a perfect 1.0 to a realistic 0.91 and 0.71, so the task now actually separates them.
 
 ---
 
@@ -69,7 +69,7 @@ SuperPOD (1×H800, NF4). Blue = JEV-9B, orange = Qwen3.5-9B.
 
 *Left: decision flip rate under surface-form perturbations. Right: forced-choice accuracy once the abstain option is removed.*
 
-> **Speaker note:** Prompt injection is ceiling-limited for Qwen (already 94.5% "yes"), so the informative probes are the two surface-form perturbations.
+> **Speaker script:** T10 probes robustness to surface form. We generate four probes, two hundred pairs each. JEV flips at most five percent on any of them, with tiny probability movement. Qwen is much more sensitive: eleven and a half percent flip when we rename the options, twenty-three and a half percent when we reverse their order, and its forced-choice accuracy after removing "unsure" is 0.46 against JEV's 0.89. The interpretation is that Qwen's choices track how the options are presented, not what the text says. Prompt injection is less informative here because Qwen already says yes ninety-five percent of the time — a ceiling effect.
 
 ---
 
@@ -87,7 +87,7 @@ SuperPOD (1×H800, NF4). Blue = JEV-9B, orange = Qwen3.5-9B.
 
 *Per-item latency is comparable; note this is in-process batch inference, not HTTP end-to-end.*
 
-> **Speaker note:** Keep "calibration ≠ ranking" front and centre — it is the honest framing the whole deck rests on.
+> **Speaker script:** Latency is comparable — about 160 milliseconds per item for both models, on one H800 with four-bit weights. Now the takeaways. JEV is the stronger model end to end, with the best AUC on every task. Its one flaw was a location bias on the count head, which we fixed at report time. Qwen has usable ranking but needs a learned threshold, and its count task has no ordinal signal at all. And the framing that runs through the whole deck: calibration fixes confidence and the decision threshold, not ranking — so we always report raw and recalibrated numbers side by side.
 
 ---
 
