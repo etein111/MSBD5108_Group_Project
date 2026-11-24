@@ -92,6 +92,14 @@ def draw(task, kind, method, name, ax, preds, fits):
     ax.grid(True, linestyle=":", linewidth=0.6, color="#D8DCE2", zorder=0)
     ax.legend(fontsize=12, frameon=False, loc="upper left")
 
+    # A fit that predicts one class for every input collapses the reliability
+    # curve to a single point; say so, rather than let it read as good calibration.
+    cal_argmax = calibrated.argmax(axis=1)
+    if len(set(cal_argmax.tolist())) == 1:
+        ax.text(0.28, 0.07, f"degenerate fit: all predictions\n= class {int(cal_argmax[0])} (no ordinal signal)",
+                transform=ax.transAxes, fontsize=10.5, color=MUTED, style="italic",
+                ha="left", va="bottom")
+
 
 def main() -> None:
     OUT.mkdir(parents=True, exist_ok=True)
