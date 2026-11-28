@@ -57,7 +57,7 @@ def create_app(load_runtime, *, audit_inputs: bool = False) -> FastAPI:
         app.state.runtime = load_runtime()
         yield
 
-    app = FastAPI(title="MSBD5108 local model service", lifespan=lifespan)
+    app = FastAPI(title="MSBD5018 local model service", lifespan=lifespan)
 
     @app.get("/health")
     def health() -> dict:

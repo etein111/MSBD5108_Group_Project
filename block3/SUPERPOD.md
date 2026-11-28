@@ -77,7 +77,7 @@ sbatch block3/slurm_infer.slurm \
 查看 `choice-t10/run_summary.json` 中各模型的 `option_probes`。需要增加样本量时，通过生成器的 `--limit` 按源样本抽取，保留完整配对。
 
 2026-11-13 的正式一轮用 `--limit 200`、四类探针全开（作业 `778430`，两模型各 1600 条、
-0 失败、约 4.5 min），结果在 `../outputs/probes-t10/`，数字汇总见 [README](README.md#真实运行结果superpod2026-11-13)。
+0 失败、约 4.5 min），结果在 `../outputs/probes-t10/`，数字汇总见 [README](README.md#真实运行结果superpod四任务)。
 `prompt_injection` 的翻转率需从 `jev.jsonl` / `qwen.jsonl` 按 `pair_id` 自行统计，`run_summary.json` 只自动汇总三类选项探针。
 
 ## 断点续跑
@@ -103,16 +103,16 @@ python -m block3 calibrate --pred-dir block3/outputs/preds-shared-shots --out-di
 python -m block3 calibrate --pred-dir ../outputs/preds-shared-shots --out-dir ../outputs/shared-calibration
 ```
 
-## 实测（2026-11-12）
-
-以下是仅 Qwen 使用 few-shot 的历史结果。
+## 实测（四任务，SuperPOD）
 
 | 作业 | 内容 | 结果 |
 | --- | --- | --- |
-| `777055` | 冒烟，每类 20 条 × 2 模型 | COMPLETED 1m17s |
-| `777059` | 全量 2000 条 × 2 模型 | COMPLETED 10m20s，0 失败 |
+| `805198` | 四任务 eval（3005 条 × 2 模型） | COMPLETED 16m12s，0 失败 |
+| `805209` | 四任务 held_out（2974 条 × 2 模型） | COMPLETED 16m11s，0 失败 |
+| `805910` | phishing eval（800 条 × 2 模型） | COMPLETED，各 3 条 InputTooLong（已在校准中排除） |
+| `805915` | phishing held_out（800 条 × 2 模型） | COMPLETED，同上 |
 
-JEV 4.6 min / 5.97 rec/s，Qwen 5.4 min / 6.07 rec/s；单条 p50 延迟 137 ms / 172 ms。
+数字汇总见 [README](README.md#真实运行结果superpod四任务)。
 校准是纯 numpy/matplotlib，**直接在登录节点跑**即可，不占 GPU 分钟：
 
 ```bash
@@ -120,7 +120,7 @@ ssh cyeah@superpod.ust.hk
 source /cm/shared/apps/Anaconda3/2023.09-0/etc/profile.d/conda.sh
 conda activate jevbench && export PYTHONNOUSERSITE=1
 cd /scratch/mscbdtspod2026/cyeah/5018/code
-python -m block3 calibrate --pred-dir ../outputs/preds --out-dir ../outputs/calibration --folds 5 --seed 0
+python -m block3 calibrate --pred-dir ../outputs/preds-v2-eval --out-dir ../outputs/calibration-v2 --folds 5 --seed 0
 ```
 
 ## 已知坑

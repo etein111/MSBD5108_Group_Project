@@ -24,14 +24,15 @@
 # 1) 在 CUDA 机器上启动本地服务（Block 1 产物）
 python -m deployment.server
 
-# 2) 两个模型跑同一份评测集
+# 2) 两个模型跑同一份四任务评测集
 for model in jev qwen; do
     python -m block3 predict --model "$model" --out "block3/outputs/shared-shots/$model.jsonl" \
-        --shots-file evaluation/data/train.jsonl --shots-per-type 4
+        --shots-file evaluation/data_v2/train.jsonl --shots-per-type 4
 done
 
-# 3) 交叉拟合校准，输出报告 + reliability 图
-python -m block3 calibrate --pred-dir block3/outputs/shared-shots --out-dir block3/outputs/shared-calibration
+# 3) 校准（held_out 拟合 + 报告 + reliability 图）
+python -m block3 calibrate --pred-dir block3/outputs/shared-shots \
+    --fit-dir block3/outputs/fit --out-dir block3/outputs/shared-calibration
 
 # 4) 生成四类对抗探针的成对评测集
 python -m block3 probes --source-type noul --out-dir block3/outputs/probes --limit 200
