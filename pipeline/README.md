@@ -236,11 +236,3 @@ python -m unittest discover -s pipeline/tests -v
 | T7 | 输出格式与 JEV 一致，概率来自 logits | 同一 `Prediction` 数据类；`logits` 原样落盘 |
 | T9 | 重校准概率 + 校准对比图 | `run_calibration` → JSON/MD/PNG |
 | T10 | 每类探针生成可运行的成对样本 | `build_probe_set` + 每类一个 JSONL |
-
-## 当前状态与待办
-
-* **四任务已完成**（SMS / phishing / 毒性二分类 / 毒性计数），held_out 拟合与交叉拟合数字一致。
-* **phishing 已重建**为长度匹配版本，消除"长度/格式"混淆（原 CEAS 语料两模型 AUC≈1.0）。
-* **T10 已完成二分类任务的 200 配对**（作业 `778430`）；score 一侧暂不跑（会混入决策头位置效应）。
-* **`score` 报告端修正（γ=-2.0）** 已在报告参数里；块 1 可合进服务端。
-* ⚠️ 延迟数字来自 `cluster_run` 的进程内批量推理，不等于 HTTP 端到端延迟，T8 引用需注明口径。

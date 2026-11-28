@@ -124,16 +124,3 @@ conda activate jevbench && export PYTHONNOUSERSITE=1
 cd /scratch/mscbdtspod2026/cyeah/5018/code
 python -m pipeline calibrate --pred-dir ../outputs/preds-v2-eval --out-dir ../outputs/calibration-v2 --folds 5 --seed 0
 ```
-
-## 已知坑
-
-| 现象 | 处理 |
-| --- | --- |
-| `sbatch: command not found` / 打开帮助 | 非交互 shell 先 `source /etc/profile.d/modules.sh; module load slurm` |
-| `conda activate` 失败 | 先 `source /cm/shared/apps/Anaconda3/2023.09-0/etc/profile.d/conda.sh` |
-| 诡异的 torch/nvidia 版本错乱 | 每个作业 `export PYTHONNOUSERSITE=1` |
-| 作业被 `slurmstepd` 杀掉 | GPU 分钟累计超预算;先用 `sacct` 查余额,再决定 `--time` |
-| 登录节点 `torch.cuda.is_available()` 为 False | 正常,登录节点没有 GPU |
-| 模型下载慢/中断 | 在登录节点先跑一次 `resolve_snapshot`,job 里就是纯本地加载 |
-| `json.decoder.JSONDecodeError: Unterminated string` | 用 `str.splitlines()` 读 JSONL 会在 ` `/` ` 处断开;改为逐行迭代文件句柄(已修,`12d1302`) |
-| 长时间 ssh 会话中途 `Connection closed by remote host` | 用 `setsid nohup` 起远端监视器写标记文件,本地后台轮询,单次 ssh 失败不影响整体 |
