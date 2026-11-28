@@ -10,11 +10,11 @@ the committed splits.
 Run these commands from this directory with the same Python environment used by the project:
 
 ```powershell
-python -m pip install --upgrade -r requirements-eval.txt
+python -m pip install --upgrade -r ../requirements-eval.txt
 python main.py
 ```
 
-The pipeline downloads the source corpora, creates data/train.jsonl, data/held_out.jsonl, and data/eval.jsonl, then runs the harness with MockModelAdapter. The mock predictions and dashboard only check that the Block 2 pipeline runs; they are not real model results. The dashboard is written to outputs/mock_jevbench_evaluation_dashboard.png so it is clearly separated from dataset files.
+The pipeline downloads the source corpora, creates data/train.jsonl, data/held_out.jsonl, and data/eval.jsonl, then runs the harness with MockModelAdapter. The mock predictions and dashboard only check that the evaluation pipeline runs; they are not real model results. The dashboard is written to outputs/mock_jevbench_evaluation_dashboard.png so it is clearly separated from dataset files.
 
 ## Data sources
 
@@ -33,5 +33,5 @@ Each sample includes a `source` field. The default total is 10,000 samples, spli
 If a download fails with `output_buffer_limit`, upgrade dependencies in the same Python environment that runs `main.py`:
 
 ```powershell
-python -m pip install --upgrade -r requirements-eval.txt
+python -m pip install --upgrade -r ../requirements-eval.txt
 ```

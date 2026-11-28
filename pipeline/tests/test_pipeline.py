@@ -147,7 +147,7 @@ class AdapterTests(unittest.TestCase):
         prediction = Prediction("yes", {"no": 0.3, "yes": 0.7}, {"no": -1.0, "yes": 1.0}, 250.0)
         decision, probability, logits, latency_seconds = prediction.as_harness_tuple()
         self.assertEqual(decision, "yes")
-        # Block 2's metrics require the full distribution, not a scalar.
+        # evaluation's metrics require the full distribution, not a scalar.
         self.assertIsInstance(probability, dict)
         self.assertEqual(set(probability), {"no", "yes"})
         self.assertAlmostEqual(probability["yes"], 0.7)
@@ -177,7 +177,7 @@ class AdapterTests(unittest.TestCase):
         self.assertEqual(len(results), 2)
         for record in results:
             self.assertEqual(record["status"], "success")
-            # Block 2's metrics contract: a full distribution whose argmax is
+            # evaluation's metrics contract: a full distribution whose argmax is
             # the decision, not a scalar P(decision).
             self.assertIsInstance(record["probability"], dict)
             self.assertAlmostEqual(sum(record["probability"].values()), 1.0)

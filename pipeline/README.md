@@ -1,6 +1,6 @@
 # Pipeline — 模型适配 · 概率校准 · 对抗探针
 
-对应 `PLAN.md` 第 5 节的 T6 / T7 / T9 / T10，依赖 Block 1 的数据与 Block 2 的 harness、指标。
+对应 `PLAN.md` 第 5 节的 T6 / T7 / T9 / T10，依赖 Block 1 的数据与 harness、指标。
 本模块只负责"把两个模型接进来、把概率校准好、把四类探针生成出来"，不重新实现评测指标。
 
 ## 目录结构
@@ -21,7 +21,7 @@
 先按 [评测环境说明](../evaluation/README) 安装 `requirements-eval.txt`；真实推理还需 [CUDA 部署环境](../deployment/README.md)。
 
 ```bash
-# 1) 在 CUDA 机器上启动本地服务（Block 1 产物）
+# 1) 在 CUDA 机器上启动本地服务（deployment 产物）
 python -m deployment.server
 
 # 2) 两个模型跑同一份四任务评测集
@@ -46,13 +46,13 @@ python -m pipeline predict --model mock --out pipeline/outputs/preds/mock.jsonl
 
 ## 接口契约：两处 schema 的对齐方式
 
-Block 2 的 `evaluation/harness.py` 要求：
+`evaluation/harness.py` 要求：
 
 ```python
 predict(prompt, text, task_type, options) -> (decision, probability, logits, latency_seconds)
 ```
 
-Block 1 的 `deployment/protocol.py` 返回：
+`deployment/protocol.py` 返回：
 
 ```python
 Prediction(decision, prob: dict[str, float], logits: dict[str, float], latency_ms)
