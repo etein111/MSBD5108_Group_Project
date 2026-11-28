@@ -188,10 +188,19 @@ def native_label(task_type: str, label: Any) -> str:
 
 def augment_with_shots(
     prompt: str, task_type: str, demonstrations: Sequence[Mapping[str, Any]], *,
-    semantic_labels: bool = False,
+    semantic_labels: bool = False, task_key: Optional[str] = None,
 ) -> str:
-    """Prepend same-type demonstrations to the question; empty list is a no-op."""
-    demos = [demo for demo in demonstrations if demo.get("type") == task_type]
+    """Prepend same-task demonstrations to the question; empty list is a no-op.
+
+    ``task_key`` selects the demonstration bucket when several tasks share one
+    decision type (e.g. SMS/phishing/toxicity are all ``noul``). Without it the
+    bucket is the decision type, preserving the original behaviour.
+    """
+    if task_key is None:
+        demos = [demo for demo in demonstrations if demo.get("type") == task_type]
+    else:
+        demos = [demo for demo in demonstrations
+                 if (demo.get("task") or demo.get("type")) == task_key]
     if not demos:
         return prompt
     lines = ["Examples (text -> semantic answer):" if semantic_labels else "Examples (text -> answer):"]
@@ -204,22 +213,31 @@ def augment_with_shots(
 
 
 def prompt_for_record(item: Mapping[str, Any], demonstrations: Sequence[Mapping[str, Any]]) -> str:
-    """Use source-task examples for choice without tying them to option letters."""
+    """Use source-task examples; several tasks may share one decision type."""
+    if item["type"] == "choice":
+        return augment_with_shots(
+            item.get("prompt", ""), item.get("source_type") or item["type"], demonstrations,
+            semantic_labels=True,
+        )
     return augment_with_shots(
-        item.get("prompt", ""), item.get("source_type") or item["type"], demonstrations,
-        semantic_labels=item["type"] == "choice",
+        item.get("prompt", ""), item["type"], demonstrations,
+        semantic_labels=False, task_key=item.get("task") or item["type"],
     )
 
 
 def load_demonstrations(path: Path, per_type: int = 4) -> list:
-    """Take the first ``per_type`` train-split records of each decision type."""
+    """Take the first ``per_type`` train-split records of each task (or type)."""
     with Path(path).open(encoding="utf-8") as handle:
         records = [json.loads(line) for line in handle if line.strip()]
     chosen: Dict[str, list] = {}
     for record in records:
-        bucket = chosen.setdefault(record["type"], [])
+        key = record.get("task") or record["type"]
+        bucket = chosen.setdefault(key, [])
         if len(bucket) < per_type:
-            bucket.append({"type": record["type"], "text": record["text"], "label": record["label"]})
+            bucket.append({
+                "type": record["type"], "task": record.get("task"),
+                "text": record["text"], "label": record["label"],
+            })
     return [demo for bucket in chosen.values() for demo in bucket]
 
 
