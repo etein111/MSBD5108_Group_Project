@@ -104,7 +104,7 @@ Prediction(decision, prob: dict[str, float], logits: dict[str, float], latency_m
 
 ```bash
 # PLAN §2.3 协议：held_out 拟合、eval 报告（需要先对 held_out 跑一次预测）
-python -m block3 predict --model jev --input evaluation/data/held_out.jsonl --out block3/outputs/fit/jev.jsonl
+python -m block3 predict --model jev --input evaluation/data_v2/held_out.jsonl --out block3/outputs/fit/jev.jsonl
 python -m block3 calibrate --pred-dir block3/outputs/eval --fit-dir block3/outputs/fit --out-dir block3/outputs/calibration
 ```
 
@@ -136,13 +136,13 @@ for model in jev qwen; do
     python -m block3 predict --model "$model" \
         --input block3/outputs/choice-probes/all_pairs.jsonl \
         --out "block3/outputs/choice-http/$model.jsonl" \
-        --shots-file evaluation/data/train.jsonl
+        --shots-file evaluation/data_v2/train.jsonl
 done
 
 # 在 GPU 节点上也可直接运行进程内推理
 python -m block3.cluster_run --input block3/outputs/choice-probes/all_pairs.jsonl \
     --out-dir block3/outputs/choice-cluster --cache-dir .cache/huggingface \
-    --shots-file evaluation/data/train.jsonl
+    --shots-file evaluation/data_v2/train.jsonl
 ```
 
 HTTP 命令在标准输出中给出汇总。集群版本写到 `run_summary.json`。两者的 `option_probes` 都按探针和来源任务报告观察到的配对数及双方均成功的配对数。指标以完整配对为分母。集群汇总只计入本轮选中的记录，包括其中已落盘的预测。旧版探针应重新生成，修改选项、提示或示例后使用新输出目录，以免断点续跑复用旧预测。
@@ -151,8 +151,8 @@ HTTP 命令在标准输出中给出汇总。集群版本写到 `run_summary.json
 
 ## 真实运行结果（SuperPOD，四任务）
 
-数据为 `evaluation/data_v2/`（四任务，`block3/rebuild_data.py` 从原切分派生）和 `evaluation/data_phishing/`
-（长度匹配的 phishing，`block3/build_phishing.py` 构造）。两个模型收到**同一份** few-shot 示例
+数据为 `evaluation/data_v2/`（四任务）和 `evaluation/data_phishing/`（长度匹配的 phishing，
+`block3/build_phishing.py` 构造）。两个模型收到**同一份** few-shot 示例
 （`--shots-file .../train.jsonl --shots-per-type 4`，按任务取样、顺序一致）。
 
 评测集规模：SMS 628、phishing 797（长度匹配）、毒性二分类 1,016、毒性计数 1,016。一卡 H800 80GB、

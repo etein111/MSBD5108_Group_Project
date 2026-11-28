@@ -13,10 +13,10 @@ produced.
 Example (inside an sbatch job)::
 
     python -m block3.cluster_run \
-        --input evaluation/data/eval.jsonl \
+        --input evaluation/data_v2/eval.jsonl \
         --out-dir /scratch/.../outputs/preds \
         --cache-dir /scratch/.../hf \
-        --shots-file evaluation/data/train.jsonl
+        --shots-file evaluation/data_v2/train.jsonl
 """
 
 from __future__ import annotations
@@ -140,7 +140,7 @@ def run_model(runtime, model: str, records, out_path: Path, demonstrations) -> D
 
 def main(argv: Optional[Sequence[str]] = None) -> None:
     parser = argparse.ArgumentParser(description="Batch-infer JEV and Qwen on a GPU node.")
-    parser.add_argument("--input", type=Path, default=Path("evaluation/data/eval.jsonl"))
+    parser.add_argument("--input", type=Path, default=Path("evaluation/data_v2/eval.jsonl"))
     parser.add_argument("--out-dir", type=Path, required=True)
     parser.add_argument("--cache-dir", type=Path, required=True)
     parser.add_argument("--models", nargs="+", default=["jev", "qwen"], choices=["jev", "qwen"])

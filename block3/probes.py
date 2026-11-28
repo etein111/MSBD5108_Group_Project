@@ -272,7 +272,7 @@ def summarize_option_probes(records: Sequence[Mapping[str, Any]]) -> dict:
 
 def main(argv: Optional[Sequence[str]] = None) -> None:
     parser = argparse.ArgumentParser(description="Generate paired adversarial probe sets (T10).")
-    parser.add_argument("--input", type=Path, default=Path("evaluation/data/eval.jsonl"))
+    parser.add_argument("--input", type=Path, default=Path("evaluation/data_v2/eval.jsonl"))
     parser.add_argument("--out-dir", type=Path, default=Path("block3/outputs/probes"))
     parser.add_argument("--limit", type=int, default=None, help="max records per decision type")
     parser.add_argument("--source-type", choices=tuple(DEFAULT_OPTIONS), help="only probe this source task")

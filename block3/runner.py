@@ -180,7 +180,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
 
     predict = sub.add_parser("predict", help="call a model adapter over a JSONL dataset")
     predict.add_argument("--model", choices=("jev", "qwen", "mock"), required=True)
-    predict.add_argument("--input", type=Path, default=Path("evaluation/data/eval.jsonl"))
+    predict.add_argument("--input", type=Path, default=Path("evaluation/data_v2/eval.jsonl"))
     predict.add_argument("--out", type=Path, required=True)
     predict.add_argument("--base-url", default="http://127.0.0.1:8000")
     predict.add_argument("--limit", type=int, default=None)

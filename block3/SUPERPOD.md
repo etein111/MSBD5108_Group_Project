@@ -45,7 +45,7 @@ PLAN §2.3 要求「用 held_out 集拟合、eval 集报告」。先给 held_out
 
 ```bash
 sbatch block3/slurm_infer.slurm \
-    --input "$PWD/evaluation/data/held_out.jsonl" \
+    --input "$PWD/evaluation/data_v2/held_out.jsonl" \
     --out-dir "$PWD/../outputs/fit"
 ```
 
