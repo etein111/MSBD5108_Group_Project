@@ -19,7 +19,7 @@ cd "$PROJ/code"
 hostname
 nvidia-smi --query-gpu=name,memory.total --format=csv,noheader
 
-python -m block3.cluster_run \
+python -m pipeline.cluster_run \
   --input "$PROJ/code/evaluation/data/eval.jsonl" \
   --out-dir "$PROJ/outputs/preds-shared-shots" \
   --cache-dir "$HF_HOME" \

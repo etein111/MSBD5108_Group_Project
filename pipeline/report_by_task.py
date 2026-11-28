@@ -4,7 +4,7 @@ The cluster runner does not copy ``task`` into its predictions, so we join the
 predictions back to the data split by ``id`` and then calibrate each task
 separately (binary tasks with Platt, the score task with ordinal scaling).
 
-    python -m block3.report_by_task \
+    python -m pipeline.report_by_task \
         --pred-dir outputs/preds-v2-eval --data evaluation/data_v2/eval.jsonl \
         --fit-dir outputs/preds-v2-fit --fit-data evaluation/data_v2/held_out.jsonl \
         --out outputs/calibration-v2/by_task.json

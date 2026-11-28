@@ -3,7 +3,7 @@
 __pycache__/
 
 # Block 3 runtime artifacts
-/block3/outputs/
+/pipeline/outputs/
 
 # OS / IDE / build artifacts
 .DS_Store

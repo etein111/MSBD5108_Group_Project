@@ -1,4 +1,4 @@
-"""Block 3 — model adapters (T6, T7).
+"""Pipeline — model adapters (T6, T7).
 
 Bridge the local deployment service (``deployment/server.py``) to the evaluation
 harness. Both adapters POST to ``/v1/{model}/predict`` with ``{type, text, prompt}``

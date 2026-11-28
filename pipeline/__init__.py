@@ -1,4 +1,4 @@
-"""Block 3 — model adapters (T6/T7), calibration (T9) and adversarial probes (T10)."""
+"""Pipeline — model adapters (T6/T7), calibration (T9) and adversarial probes (T10)."""
 
 from .adapters import HttpAdapter, JevAdapter, MockAdapter, Prediction, QwenAdapter
 from .calibration import (

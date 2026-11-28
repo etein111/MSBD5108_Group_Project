@@ -1,4 +1,4 @@
-"""Single entry point: ``python -m block3 <predict|calibrate|probes> ...``."""
+"""Single entry point: ``python -m pipeline <predict|calibrate|probes> ...``."""
 
 from __future__ import annotations
 

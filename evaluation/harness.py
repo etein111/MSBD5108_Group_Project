@@ -75,7 +75,7 @@ class JevBenchHarness:
             opts = item.get("options", [])
 
             try:
-                # Adapters that can use the whole record (e.g. block3's choice
+                # Adapters that can use the whole record (e.g. pipeline's choice
                 # probes need ``source_type`` for few-shot selection) opt in by
                 # exposing ``predict_record``; the 4-argument contract remains
                 # the fallback for plain ModelAdapter implementations.

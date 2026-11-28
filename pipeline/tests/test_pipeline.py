@@ -1,4 +1,4 @@
-"""Offline tests for Block 3 — no GPU and no running service required."""
+"""Offline tests for Pipeline — no GPU and no running service required."""
 
 from __future__ import annotations
 
@@ -12,7 +12,7 @@ from unittest.mock import patch
 
 import numpy as np
 
-from block3.adapters import (
+from pipeline.adapters import (
     JevAdapter,
     MockAdapter,
     Prediction,
@@ -22,7 +22,7 @@ from block3.adapters import (
     normalize_decision,
     prompt_for_record,
 )
-from block3.calibration import (
+from pipeline.calibration import (
     OrdinalScaler,
     PlattScaler,
     TemperatureScaler,
@@ -41,11 +41,11 @@ from block3.calibration import (
     quadratic_weighted_kappa,
     run_calibration,
 )
-from block3.cluster_run import run_model
-from block3.probes import OPTION_PROBES, PROBES, apply_probe, build_probe_set, summarize_option_probes, write_probe_sets
+from pipeline.cluster_run import run_model
+from pipeline.probes import OPTION_PROBES, PROBES, apply_probe, build_probe_set, summarize_option_probes, write_probe_sets
 from deployment.protocol import Prediction as RuntimePrediction, format_scores
-from block3.runner import main as runner_main
-from block3.runner import run_adapter
+from pipeline.runner import main as runner_main
+from pipeline.runner import run_adapter
 from evaluation.harness import JevBenchHarness
 
 NOUL_RECORD = {

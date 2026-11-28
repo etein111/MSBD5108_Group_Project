@@ -26,7 +26,7 @@ hostname
 nvidia-smi --query-gpu=name,memory.total --format=csv,noheader
 echo "input=$INPUT out=$OUTDIR shots=$SHOTS"
 
-python -m block3.cluster_run \
+python -m pipeline.cluster_run \
   --input "$INPUT" \
   --out-dir "$OUTDIR" \
   --cache-dir "$HF_HOME" \

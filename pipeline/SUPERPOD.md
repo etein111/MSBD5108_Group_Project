@@ -27,14 +27,14 @@ source /etc/profile.d/modules.sh; module load slurm
 
 # 1) 冒烟(每类 20 条,约 5 分钟)
 cd /scratch/mscbdtspod2026/cyeah/5018/code
-sbatch block3/slurm_infer.slurm --limit-per-type 20
+sbatch pipeline/slurm_infer.slurm --limit-per-type 20
 
 # 2) 看日志
 tail -f /scratch/mscbdtspod2026/cyeah/5018/outputs/infer_<jobid>.out
 squeue -u $USER
 
 # 3) 全量(2000 条 × 2 模型)
-sbatch block3/slurm_infer.slurm
+sbatch pipeline/slurm_infer.slurm
 ```
 
 `--gpus=1`、`--time=01:00:00`;H800 80GB 对 9B(4-bit NF4)绰绰有余,单卡即可。
@@ -44,7 +44,7 @@ sbatch block3/slurm_infer.slurm
 PLAN §2.3 要求「用 held_out 集拟合、eval 集报告」。先给 held_out 跑一次预测(只需一次):
 
 ```bash
-sbatch block3/slurm_infer.slurm \
+sbatch pipeline/slurm_infer.slurm \
     --input "$PWD/evaluation/data_v2/held_out.jsonl" \
     --out-dir "$PWD/../outputs/fit"
 ```
@@ -52,7 +52,7 @@ sbatch block3/slurm_infer.slurm \
 再在登录节点出报告(纯 numpy/matplotlib,不占 GPU):
 
 ```bash
-python -m block3 calibrate \
+python -m pipeline calibrate \
     --pred-dir ../outputs/preds-shared-shots \
     --fit-dir ../outputs/fit \
     --out-dir ../outputs/calibration-heldout \
@@ -66,11 +66,11 @@ python -m block3 calibrate \
 在集群仓库根目录生成选项探针，再给 Slurm 脚本传入专用输入和输出目录。两模型使用脚本指定的同一份 train few-shot 示例。
 
 ```bash
-python -m block3 probes --source-type noul --limit 2 --seed 0 \
+python -m pipeline probes --source-type noul --limit 2 --seed 0 \
     --probes option_renaming option_order_permutation abstain_removal \
-    --out-dir block3/outputs/choice-probes
-sbatch block3/slurm_infer.slurm \
-    --input "$PWD/block3/outputs/choice-probes/all_pairs.jsonl" \
+    --out-dir pipeline/outputs/choice-probes
+sbatch pipeline/slurm_infer.slurm \
+    --input "$PWD/pipeline/outputs/choice-probes/all_pairs.jsonl" \
     --out-dir "$PWD/../outputs/choice-t10"
 ```
 
@@ -93,14 +93,14 @@ sbatch block3/slurm_infer.slurm \
 ## 回本地做校准
 
 ```bash
-scp -r cyeah@superpod.ust.hk:/scratch/mscbdtspod2026/cyeah/5018/outputs/preds-shared-shots ./block3/outputs/
-python -m block3 calibrate --pred-dir block3/outputs/preds-shared-shots --out-dir block3/outputs/shared-calibration
+scp -r cyeah@superpod.ust.hk:/scratch/mscbdtspod2026/cyeah/5018/outputs/preds-shared-shots ./pipeline/outputs/
+python -m pipeline calibrate --pred-dir pipeline/outputs/preds-shared-shots --out-dir pipeline/outputs/shared-calibration
 ```
 
 或者直接在集群上跑(校准只需要 numpy/matplotlib,`jevbench` 环境已装):
 
 ```bash
-python -m block3 calibrate --pred-dir ../outputs/preds-shared-shots --out-dir ../outputs/shared-calibration
+python -m pipeline calibrate --pred-dir ../outputs/preds-shared-shots --out-dir ../outputs/shared-calibration
 ```
 
 ## 实测（四任务，SuperPOD）
@@ -122,7 +122,7 @@ ssh cyeah@superpod.ust.hk
 source /cm/shared/apps/Anaconda3/2023.09-0/etc/profile.d/conda.sh
 conda activate jevbench && export PYTHONNOUSERSITE=1
 cd /scratch/mscbdtspod2026/cyeah/5018/code
-python -m block3 calibrate --pred-dir ../outputs/preds-v2-eval --out-dir ../outputs/calibration-v2 --folds 5 --seed 0
+python -m pipeline calibrate --pred-dir ../outputs/preds-v2-eval --out-dir ../outputs/calibration-v2 --folds 5 --seed 0
 ```
 
 ## 已知坑

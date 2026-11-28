@@ -1,12 +1,12 @@
-"""Block 3 — prediction runner and calibration CLI.
+"""Pipeline — prediction runner and calibration CLI.
 
 Examples
 --------
 Start the service first (``python -m deployment.server`` on a CUDA machine), then::
 
-    python -m block3.runner predict --model jev  --out block3/outputs/preds/jev.jsonl
-    python -m block3.runner predict --model qwen --out block3/outputs/preds/qwen.jsonl
-    python -m block3.runner calibrate --pred-dir block3/outputs/preds --out-dir block3/outputs/calibration
+    python -m pipeline.runner predict --model jev  --out pipeline/outputs/preds/jev.jsonl
+    python -m pipeline.runner predict --model qwen --out pipeline/outputs/preds/qwen.jsonl
+    python -m pipeline.runner calibrate --pred-dir pipeline/outputs/preds --out-dir pipeline/outputs/calibration
 
 Development without a GPU: ``--model mock`` exercises the whole pipeline offline.
 """
@@ -175,7 +175,7 @@ def _calibrate(args: argparse.Namespace) -> None:
 
 
 def main(argv: Optional[Sequence[str]] = None) -> None:
-    parser = argparse.ArgumentParser(description="Block 3 prediction / calibration runner.")
+    parser = argparse.ArgumentParser(description="Pipeline prediction / calibration runner.")
     sub = parser.add_subparsers(dest="command", required=True)
 
     predict = sub.add_parser("predict", help="call a model adapter over a JSONL dataset")
@@ -190,8 +190,8 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
     predict.set_defaults(handler=_predict)
 
     calibrate = sub.add_parser("calibrate", help="cross-fitted raw-vs-recalibrated report")
-    calibrate.add_argument("--pred-dir", type=Path, default=Path("block3/outputs/preds"))
-    calibrate.add_argument("--out-dir", type=Path, default=Path("block3/outputs/calibration"))
+    calibrate.add_argument("--pred-dir", type=Path, default=Path("pipeline/outputs/preds"))
+    calibrate.add_argument("--out-dir", type=Path, default=Path("pipeline/outputs/calibration"))
     calibrate.add_argument("--folds", type=int, default=5)
     calibrate.add_argument("--seed", type=int, default=0)
     calibrate.add_argument("--no-plot", action="store_true")

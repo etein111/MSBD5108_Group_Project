@@ -1,4 +1,4 @@
-"""Block 3 — post-hoc calibration pipeline (T9).
+"""Pipeline — post-hoc calibration pipeline (T9).
 
 Two protocols are supported, and the report records which one produced it:
 

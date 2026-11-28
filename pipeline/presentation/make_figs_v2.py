@@ -15,7 +15,7 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
-from block3.calibration import (
+from pipeline.calibration import (
     calibration_scores, fit_on, label_indices, probability_matrix, reliability_bins,
 )
 
@@ -26,7 +26,7 @@ GROUPS = {
     "toxicity": [("noul", "noul", "platt", "Toxicity (binary)"),
                  ("score", "score", "ordinal", "Toxicity count")],
 }
-OUT = Path("block3/outputs/presentation")
+OUT = Path("pipeline/outputs/presentation")
 
 
 def load(path: Path) -> list:

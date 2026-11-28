@@ -3,8 +3,8 @@
 Loads ``deployment.runtime.Runtime`` once and runs JEV and the frozen Qwen
 backbone over a JevBench JSONL dataset in-process — no HTTP server, no port.
 
-Output records use the same schema ``block3.runner`` writes, so
-``python -m block3 calibrate --pred-dir <out-dir>`` consumes them directly.
+Output records use the same schema ``pipeline.runner`` writes, so
+``python -m pipeline calibrate --pred-dir <out-dir>`` consumes them directly.
 
 The run is resumable: ids already present in an output file are skipped, and
 every record is flushed immediately, so a wall-clock timeout keeps what it
@@ -12,7 +12,7 @@ produced.
 
 Example (inside an sbatch job)::
 
-    python -m block3.cluster_run \
+    python -m pipeline.cluster_run \
         --input evaluation/data_v2/eval.jsonl \
         --out-dir /scratch/.../outputs/preds \
         --cache-dir /scratch/.../hf \

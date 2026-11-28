@@ -115,7 +115,7 @@ done
 
 `options` 仅用于 `choice`，必填且包含 2–16 项。每项的 `id` 和 `text` 必须是非空的单行字符串，`id` 须唯一且无首尾空白。服务按数组顺序将展示文字渲染为 `A) No`、`B) Yes`、`C) Unsure`。JEV 对当前选项使用原生 `choice` 决策头及其温度，Qwen 在相同字母 token 上读 logits 并计算 softmax。返回的 `decision`、`prob` 和 `logits` 都使用请求中的 ID。两模型的输入 token 可以用 `--audit-inputs` 对照。
 
-成对实验应让原始和扰动样本都使用 `choice`，并按 ID 对齐预测。改名时保留 ID，换序时移动整个选项，移除弃权时删除末尾的 `unsure`。主评测使用原生 `noul` 和 `score`。 [生成与运行探针](../block3/README.md#t10--四类对抗探针)
+成对实验应让原始和扰动样本都使用 `choice`，并按 ID 对齐预测。改名时保留 ID，换序时移动整个选项，移除弃权时删除末尾的 `unsure`。主评测使用原生 `noul` 和 `score`。 [生成与运行探针](../pipeline/README.md#t10--四类对抗探针)
 
 ## 验收
 

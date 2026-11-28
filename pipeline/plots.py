@@ -1,4 +1,4 @@
-"""Block 3 — static figures for the calibration report.
+"""Pipeline — static figures for the calibration report.
 
 Reliability diagram (one panel per model x decision type), raw vs recalibrated.
 Two-series categorical palette: Okabe-Ito blue/vermillion, a published

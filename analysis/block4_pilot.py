@@ -1,4 +1,4 @@
-"""Run a reproducible CPU pilot against the checked-out Block 3 code."""
+"""Run a reproducible CPU pilot against the checked-out Pipeline code."""
 
 import argparse
 import hashlib
@@ -22,8 +22,8 @@ def main():
 
     repo = args.repo.resolve()
     sys.path.insert(0, str(repo))
-    from block3.adapters import MockAdapter, load_demonstrations
-    from block3.runner import load_records, run_adapter, write_jsonl
+    from pipeline.adapters import MockAdapter, load_demonstrations
+    from pipeline.runner import load_records, run_adapter, write_jsonl
     from evaluation.metrics import JevBenchMetrics
 
     data = repo / "evaluation" / "data"

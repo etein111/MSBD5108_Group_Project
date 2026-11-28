@@ -11,7 +11,7 @@ builder:
   * writes JevBench ``noul`` records with the phishing prompt.
 
 Usage (on the cluster, env with ``datasets``/``huggingface_hub``):
-    python -m block3.build_phishing --source zefang --out evaluation/data_phishing
+    python -m pipeline.build_phishing --source zefang --out evaluation/data_phishing
 """
 
 from __future__ import annotations

@@ -1,4 +1,4 @@
-# Block 3 — 模型适配 · 概率校准 · 对抗探针
+# Pipeline — 模型适配 · 概率校准 · 对抗探针
 
 对应 `PLAN.md` 第 5 节的 T6 / T7 / T9 / T10，依赖 Block 1 的数据与 Block 2 的 harness、指标。
 本模块只负责"把两个模型接进来、把概率校准好、把四类探针生成出来"，不重新实现评测指标。
@@ -14,7 +14,7 @@
 | `runner.py` | T6/T7/T9 | `predict` / `calibrate` 两条命令 |
 | `cluster_run.py` | T6/T7 | SuperPOD 上不启服务、进程内直接批量推理（可断点续跑） |
 | `slurm_infer.slurm` | — | 提交到 `normal` 分区的批处理脚本 |
-| `tests/test_block3.py` | — | 离线测试，无需 GPU、无需启动服务 |
+| `tests/test_pipeline.py` | — | 离线测试，无需 GPU、无需启动服务 |
 
 ## 快速开始
 
@@ -26,22 +26,22 @@ python -m deployment.server
 
 # 2) 两个模型跑同一份四任务评测集
 for model in jev qwen; do
-    python -m block3 predict --model "$model" --out "block3/outputs/shared-shots/$model.jsonl" \
+    python -m pipeline predict --model "$model" --out "pipeline/outputs/shared-shots/$model.jsonl" \
         --shots-file evaluation/data_v2/train.jsonl --shots-per-type 4
 done
 
 # 3) 校准（held_out 拟合 + 报告 + reliability 图）
-python -m block3 calibrate --pred-dir block3/outputs/shared-shots \
-    --fit-dir block3/outputs/fit --out-dir block3/outputs/shared-calibration
+python -m pipeline calibrate --pred-dir pipeline/outputs/shared-shots \
+    --fit-dir pipeline/outputs/fit --out-dir pipeline/outputs/shared-calibration
 
 # 4) 生成四类对抗探针的成对评测集
-python -m block3 probes --source-type noul --out-dir block3/outputs/probes --limit 200
+python -m pipeline probes --source-type noul --out-dir pipeline/outputs/probes --limit 200
 ```
 
 没有 GPU 时，把 `--model` 换成 `mock` 即可跑通整条链路（只验证管线，数字没有意义）：
 
 ```bash
-python -m block3 predict --model mock --out block3/outputs/preds/mock.jsonl
+python -m pipeline predict --model mock --out pipeline/outputs/preds/mock.jsonl
 ```
 
 ## 接口契约：两处 schema 的对齐方式
@@ -104,8 +104,8 @@ Prediction(decision, prob: dict[str, float], logits: dict[str, float], latency_m
 
 ```bash
 # PLAN §2.3 协议：held_out 拟合、eval 报告（需要先对 held_out 跑一次预测）
-python -m block3 predict --model jev --input evaluation/data_v2/held_out.jsonl --out block3/outputs/fit/jev.jsonl
-python -m block3 calibrate --pred-dir block3/outputs/eval --fit-dir block3/outputs/fit --out-dir block3/outputs/calibration
+python -m pipeline predict --model jev --input evaluation/data_v2/held_out.jsonl --out pipeline/outputs/fit/jev.jsonl
+python -m pipeline calibrate --pred-dir pipeline/outputs/eval --fit-dir pipeline/outputs/fit --out-dir pipeline/outputs/calibration
 ```
 
 注意：ECE 只衡量"置信度是否等于正确率"，校准不会提升 Brier 的区分度部分；
@@ -127,21 +127,21 @@ python -m block3 calibrate --pred-dir block3/outputs/eval --fit-dir block3/outpu
 在仓库根目录运行。使用 `--limit` 在生成时抽取源样本，确保原始与扰动记录一起运行。
 
 ```bash
-python -m block3 probes --source-type noul --limit 2 --seed 0 \
+python -m pipeline probes --source-type noul --limit 2 --seed 0 \
     --probes option_renaming option_order_permutation abstain_removal \
-    --out-dir block3/outputs/choice-probes
+    --out-dir pipeline/outputs/choice-probes
 
 # 先启动 deployment.server，再运行两个 HTTP 客户端
 for model in jev qwen; do
-    python -m block3 predict --model "$model" \
-        --input block3/outputs/choice-probes/all_pairs.jsonl \
-        --out "block3/outputs/choice-http/$model.jsonl" \
+    python -m pipeline predict --model "$model" \
+        --input pipeline/outputs/choice-probes/all_pairs.jsonl \
+        --out "pipeline/outputs/choice-http/$model.jsonl" \
         --shots-file evaluation/data_v2/train.jsonl
 done
 
 # 在 GPU 节点上也可直接运行进程内推理
-python -m block3.cluster_run --input block3/outputs/choice-probes/all_pairs.jsonl \
-    --out-dir block3/outputs/choice-cluster --cache-dir .cache/huggingface \
+python -m pipeline.cluster_run --input pipeline/outputs/choice-probes/all_pairs.jsonl \
+    --out-dir pipeline/outputs/choice-cluster --cache-dir .cache/huggingface \
     --shots-file evaluation/data_v2/train.jsonl
 ```
 
@@ -152,13 +152,13 @@ HTTP 命令在标准输出中给出汇总。集群版本写到 `run_summary.json
 ## 真实运行结果（SuperPOD，四任务）
 
 数据为 `evaluation/data_v2/`（SMS / 毒性二分类 / 毒性计数）和 `evaluation/data_phishing/`
-（长度匹配的 phishing，`block3/build_phishing.py` 构造）。两个模型收到**同一份** few-shot 示例
+（长度匹配的 phishing，`pipeline/build_phishing.py` 构造）。两个模型收到**同一份** few-shot 示例
 （`--shots-file .../train.jsonl --shots-per-type 4`，按任务取样、顺序一致）。
 
 评测集规模：SMS 628、phishing 797（长度匹配）、毒性二分类 1,016、毒性计数 1,016。一卡 H800 80GB、
 4-bit NF4、进程内批量推理（`cluster_run.py`），0 失败。非 phishing 任务作业 `805198` / `805209`
 （清理旧 phishing 前为 3005 / 2974 条），phishing 作业
-`805910` / `805915`。校准用 held_out 拟合（PLAN §2.3）；产物在 `block3/outputs/`（gitignore，不入库）。
+`805910` / `805915`。校准用 held_out 拟合（PLAN §2.3）；产物在 `pipeline/outputs/`（gitignore，不入库）。
 完整幻灯片版见 [`presentation/slides.md`](presentation/slides.md)。
 
 **延迟（单条，毫秒）**
@@ -224,7 +224,7 @@ HTTP 命令在标准输出中给出汇总。集群版本写到 `run_summary.json
 ## 测试
 
 ```bash
-python -m unittest discover -s block3/tests -v
+python -m unittest discover -s pipeline/tests -v
 ```
 
 覆盖：schema 投影、harness 兼容、探针配对、Platt/温度拟合、交叉拟合确定性、端到端报告与出图、CLI。
