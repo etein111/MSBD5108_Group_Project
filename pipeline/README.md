@@ -159,7 +159,6 @@ HTTP 命令在标准输出中给出汇总。集群版本写到 `run_summary.json
 4-bit NF4、进程内批量推理（`cluster_run.py`），0 失败。非 phishing 任务作业 `805198` / `805209`
 （清理旧 phishing 前为 3005 / 2974 条），phishing 作业
 `805910` / `805915`。校准用 held_out 拟合（PLAN §2.3）；产物在 `pipeline/outputs/`（gitignore，不入库）。
-完整幻灯片版见 [`presentation/slides.md`](presentation/slides.md)。
 
 **延迟（单条，毫秒）**
 
@@ -240,8 +239,7 @@ python -m unittest discover -s pipeline/tests -v
 
 ## 当前状态与待办
 
-* **四任务已完成**（SMS / phishing / 毒性二分类 / 毒性计数），held_out 拟合与交叉拟合数字一致；
-  详见 [`presentation/slides.md`](presentation/slides.md)。
+* **四任务已完成**（SMS / phishing / 毒性二分类 / 毒性计数），held_out 拟合与交叉拟合数字一致。
 * **phishing 已重建**为长度匹配版本，消除"长度/格式"混淆（原 CEAS 语料两模型 AUC≈1.0）。
 * **T10 已完成二分类任务的 200 配对**（作业 `778430`）；score 一侧暂不跑（会混入决策头位置效应）。
 * **`score` 报告端修正（γ=-2.0）** 已在报告参数里；块 1 可合进服务端。

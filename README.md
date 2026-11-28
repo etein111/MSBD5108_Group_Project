@@ -25,7 +25,6 @@ inference cost, and latency**, plus **robustness** under four adversarial probes
 | `evaluation/` | Data pipeline, `JevBenchHarness`, metrics (ECE/Brier/AUROC/QWK, bootstrap CIs) |
 | `pipeline/` | Model adapters, post-hoc calibration, adversarial probes, batch runner |
 | `analysis/` | T11 patch and T12 statistical analysis, robustness comparisons |
-| `pipeline/presentation/slides.md` | Results deck: figures, speaker scripts, Q&A |
 
 `pipeline/README.md` documents the comparison pipeline in detail; `deployment/README.md`
 and `evaluation/README.md` cover serving and evaluation respectively.
@@ -64,7 +63,7 @@ Measured on HKUST SuperPOD (one H800, 4-bit NF4). JEV-9B ranks best on every tas
 The toxicity-count task has no usable ordinal signal in Qwen (QWK = 0); JEV's only flaw
 is a decision-head location bias, fixed by ordinal scaling (`softmax(logits/T + γ·i)`,
 γ = −2.0) at report time. Full tables, reliability diagrams and methodology are in
-[`pipeline/README.md`](pipeline/README.md) and the [slides](pipeline/presentation/slides.md).
+[`pipeline/README.md`](pipeline/README.md).
 
 ## Team
 
