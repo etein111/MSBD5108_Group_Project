@@ -151,12 +151,13 @@ HTTP 命令在标准输出中给出汇总。集群版本写到 `run_summary.json
 
 ## 真实运行结果（SuperPOD，四任务）
 
-数据为 `evaluation/data_v2/`（四任务）和 `evaluation/data_phishing/`（长度匹配的 phishing，
-`block3/build_phishing.py` 构造）。两个模型收到**同一份** few-shot 示例
+数据为 `evaluation/data_v2/`（SMS / 毒性二分类 / 毒性计数）和 `evaluation/data_phishing/`
+（长度匹配的 phishing，`block3/build_phishing.py` 构造）。两个模型收到**同一份** few-shot 示例
 （`--shots-file .../train.jsonl --shots-per-type 4`，按任务取样、顺序一致）。
 
 评测集规模：SMS 628、phishing 797（长度匹配）、毒性二分类 1,016、毒性计数 1,016。一卡 H800 80GB、
-4-bit NF4、进程内批量推理（`cluster_run.py`），0 失败。四任务作业 `805198` / `805209`，phishing 作业
+4-bit NF4、进程内批量推理（`cluster_run.py`），0 失败。非 phishing 任务作业 `805198` / `805209`
+（清理旧 phishing 前为 3005 / 2974 条），phishing 作业
 `805910` / `805915`。校准用 held_out 拟合（PLAN §2.3）；产物在 `block3/outputs/`（gitignore，不入库）。
 完整幻灯片版见 [`presentation/slides.md`](presentation/slides.md)。
 

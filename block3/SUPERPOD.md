@@ -107,10 +107,12 @@ python -m block3 calibrate --pred-dir ../outputs/preds-shared-shots --out-dir ..
 
 | 作业 | 内容 | 结果 |
 | --- | --- | --- |
-| `805198` | 四任务 eval（3005 条 × 2 模型） | COMPLETED 16m12s，0 失败 |
-| `805209` | 四任务 held_out（2974 条 × 2 模型） | COMPLETED 16m11s，0 失败 |
+| `805198` | 非 phishing 任务 eval（当时 3005 条；清理后 `data_v2` 为 2660 条） | COMPLETED 16m12s，0 失败 |
+| `805209` | 非 phishing 任务 held_out（当时 2974 条；清理后 2642 条） | COMPLETED 16m11s，0 失败 |
 | `805910` | phishing eval（800 条 × 2 模型） | COMPLETED，各 3 条 InputTooLong（已在校准中排除） |
 | `805915` | phishing held_out（800 条 × 2 模型） | COMPLETED，同上 |
+
+> `data_v2` 已移除旧 CEAS phishing（345 条），现在只含 SMS / 毒性二分类 / 毒性计数；phishing 单独放在 `data_phishing/`。
 
 数字汇总见 [README](README.md#真实运行结果superpod四任务)。
 校准是纯 numpy/matplotlib，**直接在登录节点跑**即可，不占 GPU 分钟：
