@@ -1,4 +1,9 @@
-# Block 2: Data and Evaluation
+# Evaluation — Data and Harness
+
+The canonical evaluation data lives in `evaluation/data_v2/` (SMS spam, toxicity binary,
+toxicity count) and `evaluation/data_phishing/` (length-matched phishing). `data_pipeline.py`
+is the original two-task generator and is kept for provenance; it is not needed to reproduce
+the committed splits.
 
 ## Install and run
 
