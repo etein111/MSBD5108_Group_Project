@@ -1,0 +1,780 @@
+diff --git a/.gitignore b/.gitignore
+index 7c38061..2f9aafc 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -4,3 +4,4 @@ __pycache__/
+ 
+ # Block 3 runtime artifacts
+ /block3/outputs/
++/block4/outputs/
+diff --git a/block3/adapters.py b/block3/adapters.py
+index 278aa44..eebbbee 100644
+--- a/block3/adapters.py
++++ b/block3/adapters.py
+@@ -64,6 +64,7 @@ class Prediction:
+     logits: Dict[str, float]
+     latency: float  # milliseconds, as reported by the deployment service
+     model: str = ""
++    input_tokens: Optional[int] = None
+ 
+     @classmethod
+     def from_payload(cls, obj: Mapping[str, Any], task_type: str, model: str = "") -> "Prediction":
+@@ -133,6 +134,7 @@ class HttpAdapter:
+         try:
+             with urllib.request.urlopen(request, timeout=self.timeout) as response:
+                 body = json.load(response)
++                token_count = getattr(response, "headers", {}).get("X-Input-Token-Count")
+         except urllib.error.HTTPError as error:
+             detail = error.read().decode("utf-8", errors="replace")
+             raise RuntimeError(f"[{self.model}] HTTP {error.code}: {detail}") from error
+@@ -142,6 +144,8 @@ class HttpAdapter:
+                 f"`python -m deployment.server` ({error.reason})"
+             ) from error
+         prediction = Prediction.from_payload(body, task_type, self.model)
++        if token_count is not None:
++            prediction.input_tokens = int(token_count)
+         if task_type == "choice":
+             labels = set(decision_labels(task_type, options))
+             if set(prediction.prob) != labels or set(prediction.logits) != labels or prediction.decision not in labels:
+diff --git a/block4/README.md b/block4/README.md
+new file mode 100644
+index 0000000..078e04e
+--- /dev/null
++++ b/block4/README.md
+@@ -0,0 +1,44 @@
++# Block 4 · T11 运行说明
++
++本说明基于 `main` 的 `7c4deff`。将 `T11.patch` 放到任意位置，在已同步该提交的仓库根目录运行 `git apply /path/to/T11.patch`。如果在 `block4` 分支工作，先同步 `main`，保留该分支已有的 `block4_pilot.py`。
++
++## 前置检查
++
++| 模块 | 本次验证与限制 |
++| --- | --- |
++| 模型服务 | 部署代码齐全。仓库记录同一份 JEV 权重提供 JEV 决策头与关闭 LoRA 的 Qwen 冻结骨干。CPU 服务接口测试通过；本机真实启动缺少 PyTorch 和已缓存权重，且 RTX 3060 Laptop 仅有 6 GiB 显存，当前驱动报告 CUDA 12.3。仓库部署要求 CUDA 12.8，实测峰值分配 10,288 MiB、保留 11,586 MiB。 |
++| 评测数据 | 已跟踪的 `eval.jsonl` 共 1,989 条。垃圾短信 325、Enron 垃圾邮件 303、钓鱼邮件 345，均为 `noul`。Jigsaw `score` 1,016 条，标签是五项毒性子类计数。仓库目前没有独立的 `toxicity/noul` 评测记录，也没有 ToxiGen 数据。Jigsaw 的 `toxic_label` 可供组员定义二分类数据，但本次遵循已提交的任务和 prompt。 |
++| 两个适配器和 harness | Block 3 的 32 个测试与部署的 8 个测试通过；另用 CPU 测试服务通过实际 HTTP 请求验证 Jev/Qwen 适配器、harness、概率与 token 字段、失败行重试。 |
++| 四类探针 | 原生成器能对 `noul` 和 `score` 产出四类完整配对。Block 3 记录了 SuperPOD 上每类 200 对 `noul` 历史实测，仓库未跟踪逐样本原始结果。当前 `score` 探针通过模拟验证，尚无本次实测。 |
++
++## 一键运行
++
++在有 CUDA 环境的机器上，先按 [部署说明](https://github.com/etein111/MSBD5108_Group_Project/blob/7c4deff/deployment/README.md) 配置依赖。复用已有 SuperPOD 环境时，先在已分配 GPU 的节点激活 `jevbench`。在仓库根目录执行：
++
++```bash
++python -m block4.run_t11 --cache-dir /path/to/hf --out-dir block4/outputs/t11
++```
++
++默认执行两个模型、seeds `0 1 2`、每个决策类型 4 个来自训练集的共享 few-shot 示例、batch=1。每个模型和 seed 按实际决策类型预热 3 次。clean 全量，四类探针各保留 original 和 perturbed，合计 **107,406 次**逐样本推理。GPU 时限短时可以重复执行同一命令，runner 会保留已成功的记录并重试失败记录。每个输出目录只运行一个进程。先验收时可加 `--limit-per-source 2 --seeds 0`，或用 `--probe-limit-per-type 200` 保留全量 clean，但每个决策类型只抽 200 个源样本做探针。不同设置使用独立输出目录。
++
++HTTP 路径可直接调用已启动的仓库服务。用 `python -m deployment.server --audit-inputs` 启用准确的 token 计数请求头，再在另一个终端执行：
++
++```bash
++python -m block4.run_t11 --backend http --out-dir block4/outputs/t11-http
++```
++
++CPU 验证使用：
++
++```bash
++python -m block4.run_t11 --backend mock --out-dir block4/outputs/t11-mock
++```
++
++真实解码沿用仓库的约束 logits argmax。seeds 控制可选抽样，并标识重复测量轮次。同一输入的三次推理可用于分析延迟波动，统计准确率时应按源样本处理重复记录。三个选项探针沿用 Block 3 的原生 `choice` 协议，两侧使用相同的选项 ID，`source_type` 保留原任务类型。`score` 的选项改名探针两侧同用 Block 3 的等级描述问题，单独与它自己的 original 配对。
++
++## 输出和 T12 读取
++
++- `all_results.jsonl` 和 `all_results.csv` 同列。唯一键是 `seed, model, record_id`。按 `seed, model, pair_id` 配对，再用 `variant` 区分两侧。`sample_id` 可追溯到同一个 eval 原样本。
++- `probability` 保存完整标签分布，`logits` 保存原始分数。CSV 将两列编码为 JSON 字符串，空值为空单元格。字段契约见 `t11_result.schema.json`。
++- `latency_ms` 采用仓库 Runtime 的单请求服务时间，包含分词和 GPU 同步，排除 HTTP 往返与锁等待。 `gpu_seconds_proxy` 为此时间的秒数估计。`gpu_seconds` 留空，因为当前 Runtime 没有逐样本 GPU 内核计时。`--usd-per-gpu-hour` 有值时，`cost_usd_estimate` 按代理时长乘小时单价折算。`output_tokens=0` 表示没有生成文本；没有 HTTP 审计头时 `input_tokens` 留空。
++- `manifest.json` 记录设置、可比较的硬件和版本元数据、文件哈希、计划覆盖、成功数、失败数和未尝试数。`checkpoint.sqlite3` 用于续跑，最多每 50 条提交一次。异常退出后用原命令继续；改变数据、代码或配置时使用新的输出目录。
++- 模拟结果以 `backend=mock` 标识，延迟是测试适配器的固定值，资源和成本字段为空。正式统计使用真实后端的成功行；独立审计错误和缺失配对。
+diff --git a/block4/run_t11.py b/block4/run_t11.py
+new file mode 100644
+index 0000000..6fe3aff
+--- /dev/null
++++ b/block4/run_t11.py
+@@ -0,0 +1,321 @@
++"""Run Block 4 T11 on the existing JevBench evaluation split."""
++
++import argparse
++import csv
++import hashlib
++import json
++import math
++import random
++import sqlite3
++import urllib.request
++from collections import Counter
++from contextlib import closing
++from pathlib import Path
++
++from block3.adapters import (
++    JevAdapter, MockAdapter, Prediction, QwenAdapter, load_demonstrations, prompt_for_record,
++)
++from block3.probes import PROBES, build_probe_set, load_jsonl
++from deployment.protocol import decision_labels
++from deployment.runtime import DEFAULT_CACHE_DIR, DEFAULT_MAX_INPUT_TOKENS, Runtime
++from evaluation.harness import JevBenchHarness
++
++
++MODELS = {"jev": JevAdapter, "qwen": QwenAdapter}
++DEFAULT_SEEDS = (0, 1, 2)
++SCHEMA_VERSION = 1
++DATA = Path("evaluation/data")
++FIELDS = (
++    "schema_version", "backend", "model", "task", "source", "source_type", "type",
++    "probe", "variant", "seed", "sample_id", "record_id", "pair_id", "direction",
++    "gold", "decision", "probability", "logits", "latency_ms", "input_tokens",
++    "output_tokens", "gpu_seconds", "gpu_seconds_proxy", "cost_usd_estimate",
++    "status", "error",
++)
++
++
++def task_for(item):
++    kind = item.get("source_type") or item["type"]
++    source = item["source"]
++    if kind == "score":
++        return "toxicity_score"
++    if source.startswith("phishing_email"):
++        return "phishing_binary"
++    if source in {"sms_spam", "enron_spam"}:
++        return "spam_binary"
++    if "toxic" in source.lower() or "jigsaw" in source.lower():
++        return "toxicity_binary"
++    return f"{source}_binary"
++
++
++def items_for(records, args, seed):
++    clean = list(records)
++    if args.limit_per_source:
++        pools = {}
++        for row in clean:
++            pools.setdefault((row["type"], row["source"]), []).append(row)
++        rng = random.Random(seed)
++        clean = [
++            row for _, pool in sorted(pools.items())
++            for row in rng.sample(pool, min(len(pool), args.limit_per_source))
++        ]
++    return clean + build_probe_set(clean, limit=args.probe_limit_per_type, seed=seed)
++
++
++class HarnessAdapter:
++    def __init__(self, model, seed, args, demonstrations, runtime):
++        self.runtime = runtime
++        self.model = model
++        self.demonstrations = demonstrations
++        self.input_tokens = None
++        if args.backend == "http":
++            self.adapter = MODELS[model](args.base_url, timeout=args.timeout, demonstrations=demonstrations)
++        elif args.backend == "mock":
++            self.adapter = MockAdapter(model, seed)
++
++    def predict_record(self, item):
++        kind = item["type"]
++        options = item["options"] if kind == "choice" else None
++        labels = set(decision_labels(kind, options))
++        self.input_tokens = None
++        if self.runtime is not None:
++            result, tokens = self.runtime.predict(
++                self.model, kind, item["text"], prompt_for_record(item, self.demonstrations), options,
++            )
++            prediction = Prediction(result.decision, result.prob, result.logits, result.latency_ms)
++            self.input_tokens = len(tokens)
++        elif isinstance(self.adapter, MockAdapter):
++            prediction = self.adapter.predict_full(
++                prompt_for_record(item, self.demonstrations), item["text"], kind, options,
++            )
++        else:
++            prediction = self.adapter.predict_full(
++                item["prompt"], item["text"], kind, options, source_type=item.get("source_type"),
++            )
++            self.input_tokens = prediction.input_tokens
++
++        prob = prediction.prob
++        if (
++            set(prob) != labels or set(prediction.logits) != labels
++            or any(not math.isfinite(value) or not 0 <= value <= 1 for value in prob.values())
++            or not math.isclose(sum(prob.values()), 1.0, abs_tol=1e-5)
++            or prob.get(str(prediction.decision)) != max(prob.values())
++            or any(not math.isfinite(value) for value in prediction.logits.values())
++            or not math.isfinite(prediction.latency_ms) or prediction.latency_ms < 0
++        ):
++            raise ValueError("Invalid decision, probability distribution, logits, or latency")
++        return prediction.as_harness_tuple()
++
++
++def result_row(harness, item, model, seed, args):
++    result = harness.evaluate_record(item)
++    success = result["status"] == "success"
++    real = success and args.backend != "mock"
++    latency = result["latency_seconds"] * 1000 if success else None
++    proxy = latency / 1000 if real else None
++    return dict(
++        schema_version=SCHEMA_VERSION, backend=args.backend, model=model, task=task_for(item),
++        source=item["source"], source_type=item.get("source_type", item["type"]), type=item["type"],
++        probe=item.get("probe", "clean"), variant=item.get("variant"), seed=seed,
++        sample_id=item.get("origin_id", item["id"]), record_id=item["id"],
++        pair_id=item.get("pair_id"), direction=item.get("direction"), gold=result["ground_truth"],
++        decision=result["prediction"], probability=result["probability"], logits=result["raw_logits"],
++        latency_ms=latency, input_tokens=harness.adapter.input_tokens if real else None,
++        output_tokens=0 if real else None, gpu_seconds=None, gpu_seconds_proxy=proxy,
++        cost_usd_estimate=(proxy * args.usd_per_gpu_hour / 3600
++                           if proxy is not None and args.usd_per_gpu_hour is not None else None),
++        status="success" if success else "error",
++        error=None if success else result["status"].removeprefix("error: "),
++    )
++
++
++def json_text(value):
++    return json.dumps(value, ensure_ascii=False, allow_nan=False)
++
++
++def setup(args):
++    if args.backend == "local":
++        runtime = Runtime(args.cache_dir, args.max_input_tokens)
++        health = runtime.health()
++    elif args.backend == "http":
++        runtime = None
++        with urllib.request.urlopen(f"{args.base_url.rstrip('/')}/health", timeout=args.timeout) as reply:
++            health = json.load(reply)
++        if health.get("status") != "ready":
++            raise RuntimeError("The model service is not ready")
++    else:
++        return None, {}
++    # These counters change after inference and should not change the resume identity.
++    return runtime, {key: value for key, value in health.items() if not key.startswith("peak_")}
++
++
++def warm_up(harness, items, repeats):
++    representatives = {}
++    for item in items:
++        kind = item["type"]
++        if kind not in representatives or len(item["text"]) < len(representatives[kind]["text"]):
++            representatives[kind] = item
++    for _ in range(repeats):
++        for item in representatives.values():
++            result = harness.evaluate_record(item)
++            if result["status"] != "success":
++                raise RuntimeError(f"Warm-up failed for {item['type']}: {result['status']}")
++
++
++def export(db, directory, manifest):
++    count = Counter()
++    json_tmp = directory / "all_results.jsonl.tmp"
++    csv_tmp = directory / "all_results.csv.tmp"
++    with json_tmp.open("w", encoding="utf-8", newline="\n") as js, \
++            csv_tmp.open("w", encoding="utf-8", newline="") as cs:
++        writer = csv.DictWriter(cs, fieldnames=FIELDS)
++        writer.writeheader()
++        for (payload,) in db.execute("SELECT payload FROM results ORDER BY seed, model, record_id"):
++            row = json.loads(payload)
++            count[row["status"]] += 1
++            js.write(payload + "\n")
++            writer.writerow({key: json_text(value) if isinstance(value, dict) else value
++                             for key, value in row.items()})
++    json_tmp.replace(directory / "all_results.jsonl")
++    csv_tmp.replace(directory / "all_results.csv")
++    summary = {**manifest, "success": count["success"], "error": count["error"],
++               "unattempted": manifest["expected_rows"] - sum(count.values())}
++    temporary = directory / "manifest.json.tmp"
++    temporary.write_text(json.dumps(summary, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
++    temporary.replace(directory / "manifest.json")
++    return summary
++
++
++def checkpoint(db, manifest):
++    db.execute("CREATE TABLE IF NOT EXISTS manifest (id INTEGER PRIMARY KEY, payload TEXT)")
++    db.execute("""CREATE TABLE IF NOT EXISTS results (
++        seed INTEGER, model TEXT, record_id TEXT, status TEXT, payload TEXT,
++        PRIMARY KEY (seed, model, record_id)
++    )""")
++    payload = json_text(manifest)
++    db.execute("INSERT OR IGNORE INTO manifest VALUES (1, ?)", (payload,))
++    if json.loads(db.execute("SELECT payload FROM manifest WHERE id=1").fetchone()[0]) != manifest:
++        raise ValueError("Run configuration differs from the checkpoint. Use a new --out-dir.")
++    db.commit()
++
++
++def run(db, args, matrix, demonstrations, runtime):
++    for seed, items in matrix.items():
++        random.seed(seed)
++        if runtime is not None:
++            runtime.torch.manual_seed(seed)
++        for model in args.models:
++            done = {
++                record_id for (record_id,) in db.execute(
++                    "SELECT record_id FROM results WHERE seed=? AND model=? AND status='success'",
++                    (seed, model),
++                )
++            }
++            pending = [item for item in items if item["id"] not in done]
++            print(f"seed={seed} model={model}: {len(done)} complete, {len(pending)} pending", flush=True)
++            if not pending:
++                continue
++            adapter = HarnessAdapter(model, seed, args, demonstrations, runtime)
++            harness = JevBenchHarness(str(args.input), adapter)
++            if args.backend != "mock":
++                warm_up(harness, items, args.warmup_per_type)
++            for index, item in enumerate(pending, 1):
++                row = result_row(harness, item, model, seed, args)
++                db.execute(
++                    """INSERT INTO results VALUES (?, ?, ?, ?, ?)
++                       ON CONFLICT(seed, model, record_id) DO UPDATE
++                       SET status=excluded.status, payload=excluded.payload
++                       WHERE results.status!='success'""",
++                    (seed, model, item["id"], row["status"], json_text(row)),
++                )
++                if index % 50 == 0:
++                    db.commit()
++                if index % 500 == 0:
++                    print(f"seed={seed} model={model}: {index}/{len(pending)} attempted", flush=True)
++            db.commit()
++
++
++def main(argv=None):
++    parser = argparse.ArgumentParser(description=__doc__)
++    parser.add_argument("--backend", choices=("local", "http", "mock"), default="local")
++    parser.add_argument("--input", type=Path, default=DATA / "eval.jsonl")
++    parser.add_argument("--shots-file", type=Path, default=DATA / "train.jsonl")
++    parser.add_argument("--out-dir", type=Path, default=Path("block4/outputs/t11"))
++    parser.add_argument("--models", nargs="+", choices=tuple(MODELS), default=list(MODELS))
++    parser.add_argument("--seeds", nargs="+", type=int, default=list(DEFAULT_SEEDS))
++    parser.add_argument("--shots-per-type", type=int, default=4)
++    parser.add_argument("--limit-per-source", type=int)
++    parser.add_argument("--probe-limit-per-type", type=int)
++    parser.add_argument("--warmup-per-type", type=int, default=3)
++    parser.add_argument("--max-input-tokens", type=int, default=DEFAULT_MAX_INPUT_TOKENS)
++    parser.add_argument("--cache-dir", type=Path, default=DEFAULT_CACHE_DIR)
++    parser.add_argument("--base-url", default="http://127.0.0.1:8000")
++    parser.add_argument("--timeout", type=float, default=60)
++    parser.add_argument("--usd-per-gpu-hour", type=float)
++    args = parser.parse_args(argv)
++    if len(set(args.models)) != len(args.models) or len(set(args.seeds)) != len(args.seeds):
++        parser.error("models and seeds must be unique")
++    if any(not 0 <= seed < 2**32 for seed in args.seeds):
++        parser.error("seeds must be between 0 and 4294967295")
++    if not 1 <= args.max_input_tokens <= DEFAULT_MAX_INPUT_TOKENS:
++        parser.error(f"--max-input-tokens must be in [1, {DEFAULT_MAX_INPUT_TOKENS}]")
++    if (
++        args.shots_per_type < 0 or args.warmup_per_type < 0
++        or not math.isfinite(args.timeout) or args.timeout <= 0
++        or any(value is not None and value <= 0 for value in (args.limit_per_source, args.probe_limit_per_type))
++        or (args.usd_per_gpu_hour is not None
++            and (not math.isfinite(args.usd_per_gpu_hour) or args.usd_per_gpu_hour < 0))
++    ):
++        parser.error("invalid counts, timeout, or GPU hourly rate")
++
++    records = load_jsonl(args.input)
++    if not records or len({row["id"] for row in records}) != len(records):
++        parser.error("input must be nonempty with unique sample IDs")
++    demonstrations = load_demonstrations(args.shots_file, args.shots_per_type)
++    matrix = {seed: items_for(records, args, seed) for seed in args.seeds}
++    for items in matrix.values():
++        if len({item["id"] for item in items}) != len(items):
++            parser.error("generated record IDs are not unique")
++    counts = Counter(task_for(item) for item in records)
++    coverage = {
++        str(seed): dict(Counter(f"{task_for(item)}/{item.get('probe', 'clean')}" for item in items))
++        for seed, items in matrix.items()
++    }
++    try:
++        runtime, health = setup(args)
++    except (OSError, RuntimeError, ImportError) as error:
++        parser.exit(2, f"T11 {args.backend} preflight failed: {error}\n")
++    fingerprint_files = [Path(__file__), Path("block3/adapters.py"), Path("block3/probes.py"),
++                         Path("deployment/protocol.py"), Path("deployment/runtime.py"),
++                         Path("evaluation/harness.py")]
++    manifest = {
++        "schema_version": SCHEMA_VERSION, "backend": args.backend, "models": args.models,
++        "seeds": args.seeds, "shots_per_type": args.shots_per_type, "warmup_per_type": args.warmup_per_type,
++        "limit_per_source": args.limit_per_source, "probe_limit_per_type": args.probe_limit_per_type,
++        "usd_per_gpu_hour": args.usd_per_gpu_hour, "environment": health,
++        "base_url": args.base_url if args.backend == "http" else None,
++        "input_sha256": hashlib.sha256(args.input.read_bytes()).hexdigest(),
++        "shots_sha256": hashlib.sha256(args.shots_file.read_bytes()).hexdigest(),
++        "source_sha256": {path.name: hashlib.sha256(path.read_bytes()).hexdigest() for path in fingerprint_files},
++        "input_tasks": dict(counts), "toxicity_binary_present": "toxicity_binary" in counts,
++        "planned_rows_per_model": coverage,
++        "expected_rows": len(args.models) * sum(map(len, matrix.values())),
++        "decoding": "mock_hash" if args.backend == "mock" else "constrained_argmax",
++        "probes": list(PROBES),
++    }
++    if not manifest["toxicity_binary_present"]:
++        print("Dataset coverage: no toxicity binary records in the input.", flush=True)
++    args.out_dir.mkdir(parents=True, exist_ok=True)
++    with closing(sqlite3.connect(args.out_dir / "checkpoint.sqlite3")) as db:
++        checkpoint(db, manifest)
++        try:
++            run(db, args, matrix, demonstrations, runtime)
++        finally:
++            db.commit()
++            summary = export(db, args.out_dir, manifest)
++    print(json_text({key: summary[key] for key in ("expected_rows", "success", "error", "unattempted")}))
++    return bool(summary["error"] or summary["unattempted"])
++
++
++if __name__ == "__main__":
++    raise SystemExit(main())
+diff --git a/block4/t11_result.schema.json b/block4/t11_result.schema.json
+new file mode 100644
+index 0000000..4d6aa9c
+--- /dev/null
++++ b/block4/t11_result.schema.json
+@@ -0,0 +1,92 @@
++{
++  "$schema": "https://json-schema.org/draft/2020-12/schema",
++  "title": "Block 4 T11 inference attempt",
++  "type": "object",
++  "additionalProperties": false,
++  "required": [
++    "schema_version", "backend", "model", "task", "source", "source_type", "type",
++    "probe", "variant", "seed", "sample_id", "record_id", "pair_id", "direction",
++    "gold", "decision", "probability", "logits", "latency_ms", "input_tokens",
++    "output_tokens", "gpu_seconds", "gpu_seconds_proxy", "cost_usd_estimate",
++    "status", "error"
++  ],
++  "properties": {
++    "schema_version": {"const": 1},
++    "backend": {"enum": ["local", "http", "mock"]},
++    "model": {"enum": ["jev", "qwen"]},
++    "task": {"type": "string", "minLength": 1},
++    "source": {"type": "string", "minLength": 1},
++    "source_type": {"enum": ["noul", "score"]},
++    "type": {"enum": ["noul", "score", "choice"]},
++    "probe": {"enum": ["clean", "prompt_injection", "option_renaming", "option_order_permutation", "abstain_removal"]},
++    "variant": {"enum": [null, "original", "perturbed"]},
++    "seed": {"type": "integer", "minimum": 0, "maximum": 4294967295},
++    "sample_id": {"type": "string", "minLength": 1},
++    "record_id": {"type": "string", "minLength": 1},
++    "pair_id": {"type": ["string", "null"]},
++    "direction": {"type": ["string", "null"]},
++    "gold": {"type": ["string", "integer"]},
++    "decision": {"type": ["string", "integer", "null"]},
++    "probability": {
++      "type": ["object", "null"],
++      "additionalProperties": {"type": "number", "minimum": 0, "maximum": 1}
++    },
++    "logits": {"type": ["object", "null"], "additionalProperties": {"type": "number"}},
++    "latency_ms": {"$ref": "#/$defs/nullable_measurement"},
++    "input_tokens": {"type": ["integer", "null"], "minimum": 0},
++    "output_tokens": {"type": ["integer", "null"], "minimum": 0},
++    "gpu_seconds": {"$ref": "#/$defs/nullable_measurement"},
++    "gpu_seconds_proxy": {"$ref": "#/$defs/nullable_measurement"},
++    "cost_usd_estimate": {"$ref": "#/$defs/nullable_measurement"},
++    "status": {"enum": ["success", "error"]},
++    "error": {"type": ["string", "null"]}
++  },
++  "$defs": {
++    "nullable_measurement": {"type": ["number", "null"], "minimum": 0}
++  },
++  "allOf": [
++    {
++      "if": {"properties": {"status": {"const": "success"}}},
++      "then": {
++        "properties": {
++          "decision": {"type": ["string", "integer"]},
++          "probability": {"type": "object", "minProperties": 2},
++          "logits": {"type": "object", "minProperties": 2},
++          "latency_ms": {"type": "number"},
++          "error": {"type": "null"}
++        }
++      },
++      "else": {
++        "properties": {
++          "decision": {"type": "null"},
++          "probability": {"type": "null"},
++          "logits": {"type": "null"},
++          "latency_ms": {"type": "null"},
++          "input_tokens": {"type": "null"},
++          "output_tokens": {"type": "null"},
++          "gpu_seconds": {"type": "null"},
++          "gpu_seconds_proxy": {"type": "null"},
++          "cost_usd_estimate": {"type": "null"},
++          "error": {"type": "string"}
++        }
++      }
++    },
++    {
++      "if": {"properties": {"probe": {"const": "clean"}}},
++      "then": {"properties": {"variant": {"type": "null"}, "pair_id": {"type": "null"}}},
++      "else": {"properties": {"variant": {"enum": ["original", "perturbed"]}, "pair_id": {"type": "string"}}}
++    },
++    {
++      "if": {"properties": {"backend": {"const": "mock"}}},
++      "then": {
++        "properties": {
++          "input_tokens": {"type": "null"},
++          "output_tokens": {"type": "null"},
++          "gpu_seconds": {"type": "null"},
++          "gpu_seconds_proxy": {"type": "null"},
++          "cost_usd_estimate": {"type": "null"}
++        }
++      }
++    }
++  ]
++}
+diff --git a/evaluation/harness.py b/evaluation/harness.py
+index 6a8c864..cf64b2d 100644
+--- a/evaluation/harness.py
++++ b/evaluation/harness.py
+@@ -1,133 +1,129 @@
+-import json
+-import time
+-import os
+-from typing import List, Dict, Any, Protocol
+-
+-
+-# 1. 定义块 3 适配器必须遵守的统一 Protocol
+-class ModelAdapter(Protocol):
+-    def predict(self, prompt: str, text: str, task_type: str, options: List[Any]) -> tuple:
+-        """
+-        统一接口规范：
+-        返回: (decision, prob, logits_dict, latency_seconds)
+-        """
+-        ...
+-
+-
+-# 2. 编写 Mock 适配器用于开发验证
+-class MockModelAdapter:
+-    def predict(self, prompt: str, text: str, task_type: str, options: List[Any]) -> tuple:
+-        import random
+-        import numpy as np
+-
+-        if task_type == "noul":
+-            decision = random.choice(["yes", "no"])
+-            # 模拟生成对应 options 的完整概率分布
+-            raw_p = random.uniform(0.7, 0.99)
+-            if decision == "yes":
+-                prob_dict = {"no": round(1.0 - raw_p, 4), "yes": round(raw_p, 4)}
+-            else:
+-                prob_dict = {"no": round(raw_p, 4), "yes": round(1.0 - raw_p, 4)}
+-            logits = {"no": -1.2, "yes": 1.5}
+-
+-        elif task_type == "score":
+-            decision = random.choice(options)
+-            # 模拟 6 分类的完整 softmax 概率分布
+-            raw_logits = np.array([random.random() for _ in options])
+-            exp_logits = np.exp(raw_logits - np.max(raw_logits))
+-            probs = exp_logits / np.sum(exp_logits)
+-            prob_dict = {str(opt): round(float(p), 4) for opt, p in zip(options, probs)}
+-            # 确保 decision 对应概率最高（满足 argmax 契约）
+-            prob_dict[str(decision)] = max(prob_dict.values())
+-            logits = {str(opt): float(l) for opt, l in zip(options, raw_logits)}
+-        else:
+-            decision = options[0] if options else "no"
+-            prob_dict = {str(opt): 1.0 / len(options) for opt in options}
+-            logits = {}
+-
+-        # 增加断言：校验和约等于 1.0
+-        total_p = sum(prob_dict.values())
+-        assert abs(total_p - 1.0) < 1e-3, f"概率和不为 1: {total_p}"
+-
+-        latency_seconds = 0.05
+-        return decision, prob_dict, logits, latency_seconds
+-
+-
+-# 3. Harness 评估引擎
+-class JevBenchHarness:
+-    def __init__(self, jsonl_path: str, adapter: ModelAdapter):
+-        self.jsonl_path = jsonl_path
+-        self.adapter = adapter
+-
+-    def run(self) -> List[Dict[str, Any]]:
+-        results = []
+-
+-        # 修正：将读取和循环逻辑正确缩进到 run 方法内部
+-        with open(self.jsonl_path, "r", encoding="utf-8") as f:
+-            lines = [json.loads(line) for line in f if line.strip()]
+-
+-        for item in lines:
+-            sid = item["id"]
+-            ttype = item["type"]
+-            text = item["text"]
+-            prompt = item.get("prompt", "")
+-            gt = item["label"]
+-            opts = item.get("options", [])
+-
+-            try:
+-                # Adapters that can use the whole record (e.g. block3's choice
+-                # probes need ``source_type`` for few-shot selection) opt in by
+-                # exposing ``predict_record``; the 4-argument contract remains
+-                # the fallback for plain ModelAdapter implementations.
+-                predict_record = getattr(self.adapter, "predict_record", None)
+-                if predict_record is not None:
+-                    dec, prob, logits, lat = predict_record(item)
+-                else:
+-                    dec, prob, logits, lat = self.adapter.predict(prompt, text, ttype, opts)
+-                record = {
+-                    "id": sid,
+-                    "type": ttype,
+-                    "source": item.get("source", "unknown"),
+-                    "text": text,
+-                    "ground_truth": gt,
+-                    "prediction": dec,
+-                    "probability": prob,
+-                    "raw_logits": logits,
+-                    "latency_seconds": lat,
+-                    "status": "success"
+-                }
+-            except Exception as e:
+-                record = {
+-                    "id": sid,
+-                    "type": ttype,
+-                    "source": item.get("source", "unknown"),
+-                    "text": text,
+-                    "ground_truth": gt,
+-                    "prediction": None,
+-                    "probability": None,
+-                    "raw_logits": None,
+-                    "latency_seconds": 0.0,
+-                    "status": f"error: {str(e)}"
+-                }
+-            # Preserve Jigsaw ground-truth details for downstream audit;
+-            # these fields are not passed to the model adapter.
+-            for metadata_field in ("subtype_labels", "toxic_label"):
+-                if metadata_field in item:
+-                    record[metadata_field] = item[metadata_field]
+-
+-            results.append(record)
+-        return results
+-
+-
+-if __name__ == "__main__":
+-    # 假设你刚刚用 T4 生成了 ./data/eval.jsonl
+-    test_jsonl_path = "./data/eval.jsonl"
+-
+-    if os.path.exists(test_jsonl_path):
+-        adapter = MockModelAdapter()
+-        harness = JevBenchHarness(test_jsonl_path, adapter)
+-        eval_results = harness.run()
+-        print(f"Harness 测试成功！共输出了 {len(eval_results)} 条预测结果。")
+-        print("第一条样例结果:", eval_results[0] if eval_results else "无数据")
+-    else:
++import json
++import time
++import os
++from typing import List, Dict, Any, Protocol
++
++
++# 1. 定义块 3 适配器必须遵守的统一 Protocol
++class ModelAdapter(Protocol):
++    def predict(self, prompt: str, text: str, task_type: str, options: List[Any]) -> tuple:
++        """
++        统一接口规范：
++        返回: (decision, prob, logits_dict, latency_seconds)
++        """
++        ...
++
++
++# 2. 编写 Mock 适配器用于开发验证
++class MockModelAdapter:
++    def predict(self, prompt: str, text: str, task_type: str, options: List[Any]) -> tuple:
++        import random
++        import numpy as np
++
++        if task_type == "noul":
++            decision = random.choice(["yes", "no"])
++            # 模拟生成对应 options 的完整概率分布
++            raw_p = random.uniform(0.7, 0.99)
++            if decision == "yes":
++                prob_dict = {"no": round(1.0 - raw_p, 4), "yes": round(raw_p, 4)}
++            else:
++                prob_dict = {"no": round(raw_p, 4), "yes": round(1.0 - raw_p, 4)}
++            logits = {"no": -1.2, "yes": 1.5}
++
++        elif task_type == "score":
++            decision = random.choice(options)
++            # 模拟 6 分类的完整 softmax 概率分布
++            raw_logits = np.array([random.random() for _ in options])
++            exp_logits = np.exp(raw_logits - np.max(raw_logits))
++            probs = exp_logits / np.sum(exp_logits)
++            prob_dict = {str(opt): round(float(p), 4) for opt, p in zip(options, probs)}
++            # 确保 decision 对应概率最高（满足 argmax 契约）
++            prob_dict[str(decision)] = max(prob_dict.values())
++            logits = {str(opt): float(l) for opt, l in zip(options, raw_logits)}
++        else:
++            decision = options[0] if options else "no"
++            prob_dict = {str(opt): 1.0 / len(options) for opt in options}
++            logits = {}
++
++        # 增加断言：校验和约等于 1.0
++        total_p = sum(prob_dict.values())
++        assert abs(total_p - 1.0) < 1e-3, f"概率和不为 1: {total_p}"
++
++        latency_seconds = 0.05
++        return decision, prob_dict, logits, latency_seconds
++
++
++# 3. Harness 评估引擎
++class JevBenchHarness:
++    def __init__(self, jsonl_path: str, adapter: ModelAdapter):
++        self.jsonl_path = jsonl_path
++        self.adapter = adapter
++
++    def run(self) -> List[Dict[str, Any]]:
++        with open(self.jsonl_path, "r", encoding="utf-8") as handle:
++            return [self.evaluate_record(json.loads(line)) for line in handle if line.strip()]
++
++    def evaluate_record(self, item: dict) -> dict:
++        """Evaluate one loaded JevBench record using the same adapter contract as run()."""
++        sid = item["id"]
++        ttype = item["type"]
++        text = item["text"]
++        prompt = item.get("prompt", "")
++        gt = item["label"]
++        opts = item.get("options", [])
++
++        try:
++            # Adapters that can use the whole record (e.g. block3's choice
++            # probes need ``source_type`` for few-shot selection) opt in by
++            # exposing ``predict_record``; the 4-argument contract remains
++            # the fallback for plain ModelAdapter implementations.
++            predict_record = getattr(self.adapter, "predict_record", None)
++            if predict_record is not None:
++                dec, prob, logits, lat = predict_record(item)
++            else:
++                dec, prob, logits, lat = self.adapter.predict(prompt, text, ttype, opts)
++            record = {
++                "id": sid,
++                "type": ttype,
++                "source": item.get("source", "unknown"),
++                "text": text,
++                "ground_truth": gt,
++                "prediction": dec,
++                "probability": prob,
++                "raw_logits": logits,
++                "latency_seconds": lat,
++                "status": "success"
++            }
++        except Exception as e:
++            record = {
++                "id": sid,
++                "type": ttype,
++                "source": item.get("source", "unknown"),
++                "text": text,
++                "ground_truth": gt,
++                "prediction": None,
++                "probability": None,
++                "raw_logits": None,
++                "latency_seconds": 0.0,
++                "status": f"error: {str(e)}"
++            }
++        # Preserve Jigsaw ground-truth details for downstream audit;
++        # these fields are not passed to the model adapter.
++        for metadata_field in ("subtype_labels", "toxic_label"):
++            if metadata_field in item:
++                record[metadata_field] = item[metadata_field]
++        return record
++
++
++if __name__ == "__main__":
++    # 假设你刚刚用 T4 生成了 ./data/eval.jsonl
++    test_jsonl_path = "./data/eval.jsonl"
++
++    if os.path.exists(test_jsonl_path):
++        adapter = MockModelAdapter()
++        harness = JevBenchHarness(test_jsonl_path, adapter)
++        eval_results = harness.run()
++        print(f"Harness 测试成功！共输出了 {len(eval_results)} 条预测结果。")
++        print("第一条样例结果:", eval_results[0] if eval_results else "无数据")
++    else:
+         print(f"未找到测试文件 {test_jsonl_path}，请先运行 T4 生成数据。")
+\ No newline at end of file
